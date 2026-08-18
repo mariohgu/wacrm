@@ -185,6 +185,15 @@ export function defaultConfigFor(type: NodeType): Record<string, unknown> {
       return { mode: "add", tag_id: "", next_node_key: "" };
     case "handoff":
       return { note: "" };
+    case "create_salon_appointment":
+      return {
+        date_var_key: "",
+        time_var_key: "",
+        duration_minutes: 30,
+        extra_notes_var_keys: [],
+        next_node_key: "",
+        error_next_node_key: "",
+      };
     case "end":
       return {};
   }

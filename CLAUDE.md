@@ -116,6 +116,77 @@ plain nested tree, `BuilderStep[]`, where a `condition` step carries
   {defaultValue:...})`); treat that pattern as a footgun, not a working
   fallback — the key must actually exist in `messages/*.json`
 
+## Salon booking (external API, via Flows)
+
+WhatsApp-originated appointment booking does **not** use Google Calendar
+or a native calendar entity — this fork integrates with a separate,
+already-existing salon-management system (a Laravel + Sanctum backend
+with its own `/citas` REST API, source of truth for appointments). wacrm
+only ever POSTs a pending booking to it.
+
+- **Motor**: the conversational (multi-turn) part lives in **Flows**,
+  not Automations — Automations' engine (`src/lib/automations/engine.ts`)
+  has no primitive to suspend a run across separate inbound WhatsApp
+  messages, so it can't hold "what day? → wait → what time? → wait."
+  Flows' `flow_runs` DB row (`current_node_key`, `vars`) already is that
+  state machine; `collect_input` is the "ask and wait" node reused here.
+- **Credentials**: `salon_booking_configs` (one row per account,
+  `supabase/migrations/038_salon_booking.sql`) — a **static Sanctum
+  Personal Access Token** (Bearer), not OAuth. Encrypted with the same
+  `src/lib/whatsapp/encryption.ts` `encrypt`/`decrypt` used for
+  `whatsapp_config`/`ai_configs` (imported cross-module as-is, never
+  relocated). Admin-only RLS in both directions (credential-bearing,
+  unlike `ai_configs`' member-read) — mirrors the `ai_usage_log`
+  precedent instead.
+- **"Generic booking" strategy** (by design, not a limitation to fix
+  later): wacrm never tries to resolve the WhatsApp contact to a real
+  salon client/service/staff record — no such lookup endpoint is assumed
+  to exist. Every booking uses admin-configured placeholder ids
+  (`default_cliente_id`/`default_estado_id`/`default_servicio_id`,
+  optionally `default_staff_id`), `origen_reserva: "whatsapp"`,
+  `requiere_confirmacion: true`, and a `notas_cliente` string **built
+  automatically** by the node executor (contact name/phone + requested
+  date/time + any extra captured vars) — never a hand-written template.
+  The appointment lands as "pending" for a human to confirm/reassign.
+- **New Flow node type**: `create_salon_appointment`
+  (`src/lib/flows/types.ts` → `CreateSalonAppointmentNodeConfig`).
+  Auto-advancing (does I/O, doesn't wait on the customer). Parses its
+  two input vars **strictly** against fixed `dd/MM/yyyy` / `HH:mm`
+  formats via `date-fns` (`parseSalonDateTime`, exported from
+  `src/lib/flows/engine.ts` for unit testing) — there's no AI/NLP date
+  parsing, so the preceding `collect_input` prompts must state the
+  expected format explicitly. Two outgoing edges: `next_node_key`
+  (success) and `error_next_node_key` (missing config / unparseable
+  date-time / salon API error) — on error with no `error_next_node_key`
+  set, the run ends `failed` rather than silently continuing as if
+  booked.
+- **REST client**: `src/lib/salon-booking/client.ts` — plain `fetch`,
+  no SDK (same style as `src/lib/whatsapp/meta-api.ts` /
+  `src/lib/ai/providers/*`). `createAppointment()` POSTs `/citas`;
+  `testConnection()` GETs it (no side effect) for the settings panel's
+  "Test connection" button. No token refresh logic needed — the Sanctum
+  PAT is long-lived, unlike an OAuth access token.
+- **Adding this node type touched the same ~10-file set** every prior
+  Flows node type addition has (see the `send_media` precedent):
+  `types.ts`, `engine.ts`, `validate.ts` (+ `outgoingEdges`),
+  `components/flows/shared.tsx` (its own **duplicated** `NodeType`
+  union — kept in lockstep with `lib/flows/types.ts` by hand, no shared
+  import), `flow-editor-state.tsx` (`defaultConfigFor`),
+  `forms/node-config-form.tsx`, **both** `flow-builder.tsx` **and**
+  `flow-canvas.tsx` (two separate duplicated "addable node types"
+  arrays — a node only added to one is pickable in just one of the two
+  editor views), `lib/flows/edges.ts` (canvas edge derivation +
+  drag-to-connect + delete-cleanup — four switch statements, three of
+  which are TS-exhaustiveness-checked and will fail `tsc` if a case is
+  missing), `lib/flows/templates.ts` (its own separate
+  `FlowTemplateNodeType` union, for seed templates), and all three
+  locale files (`src/i18n/messages.test.ts` enforces parity).
+- **Seed template**: `book_appointment` in `src/lib/flows/templates.ts`
+  — clone-and-go once Settings → Salon booking is configured. Templates
+  in this repo are a single hardcoded English-content module (no
+  per-locale template variants), matching the existing
+  `welcome_menu`/`faq_bot`/`lead_capture` convention.
+
 # Change log (Claude Code sessions)
 
 ## 2026-08-02 — Add OpenRouter as a third AI provider
@@ -251,3 +322,97 @@ zero mismatches between `en.json` and `es.json` interpolation names
 verified in-browser (same login-credential limitation as above) — spot
 render of the Spanish UI with `NEXT_PUBLIC_APP_LOCALE=es` is recommended
 before considering this closed.
+
+## 2026-08-09 — Salon booking: automatic WhatsApp appointment requests via an external API
+
+User asked whether the WhatsApp bot could make automatic bookings,
+initially framed around Google Calendar. Plan changed mid-design: the
+user has their own salon-management system (separate Laravel + Sanctum
+backend/frontend, not part of this repo) that already owns appointment
+data — wacrm should register bookings *into* that system instead of
+building/syncing a calendar. See the new **Salon booking (external API,
+via Flows)** architecture section above for the full design; this entry
+covers what shipped.
+
+Explored and ruled out first: Automations (no multi-turn conversation
+state — can't do "what day? → wait → what time?"), a native
+appointments/calendar entity (the salon system is already the source of
+truth; duplicating it would be the exact opposite of "sin hacer
+demasiados cambios"), and Google Calendar OAuth2 (the user's system uses
+a static Sanctum Bearer token instead — no OAuth, no refresh-token
+machinery needed, simpler than the Calendar plan it replaced).
+
+Touched:
+
+- [supabase/migrations/038_salon_booking.sql](supabase/migrations/038_salon_booking.sql)
+  — **new migration, must be applied**: `salon_booking_configs` table
+  (admin-only RLS) + widens `flow_nodes_node_type_check` to allow
+  `'create_salon_appointment'`.
+- [src/lib/salon-booking/config.ts](src/lib/salon-booking/config.ts),
+  [client.ts](src/lib/salon-booking/client.ts) — new: config loader
+  (decrypts the stored token) + plain-fetch REST client
+  (`createAppointment`, `testConnection`), mirroring
+  `src/lib/ai/providers/*`'s no-SDK style.
+- [src/lib/flows/types.ts](src/lib/flows/types.ts),
+  [engine.ts](src/lib/flows/engine.ts),
+  [validate.ts](src/lib/flows/validate.ts),
+  [templates.ts](src/lib/flows/templates.ts),
+  [edges.ts](src/lib/flows/edges.ts) — new `create_salon_appointment`
+  node type: config shape, execution (strict `date-fns` date/time
+  parsing, builds `notas_cliente` automatically, calls the salon API),
+  activation validation, the `book_appointment` seed template, and
+  canvas edge derivation/drag-connect/delete-cleanup.
+- [src/components/flows/shared.tsx](src/components/flows/shared.tsx),
+  [flow-editor-state.tsx](src/components/flows/flow-editor-state.tsx),
+  [forms/node-config-form.tsx](src/components/flows/forms/node-config-form.tsx),
+  [flow-builder.tsx](src/components/flows/flow-builder.tsx),
+  [flow-canvas.tsx](src/components/flows/flow-canvas.tsx),
+  [src/app/(dashboard)/flows/page.tsx](<src/app/(dashboard)/flows/page.tsx>)
+  — node registered across every UI surface that enumerates node types
+  (two separate "addable types" lists, one per editor view — both
+  needed updating) + the template-gallery icon map (own separate
+  `"MessageSquare"|"HelpCircle"|"UserPlus"` union, now `+"CalendarCheck"`).
+- [src/app/api/salon-booking/config/route.ts](src/app/api/salon-booking/config/route.ts),
+  [test/route.ts](src/app/api/salon-booking/test/route.ts),
+  [src/components/settings/salon-booking-config.tsx](src/components/settings/salon-booking-config.tsx)
+  — new Settings → "Salon booking" panel, cloning the `ai-config.tsx` /
+  `api/ai/config`+`api/ai/test` shape (masked token, Test-connection
+  button, validate-before-save).
+- [src/components/settings/settings-sections.ts](src/components/settings/settings-sections.ts),
+  [src/app/(dashboard)/settings/page.tsx](<src/app/(dashboard)/settings/page.tsx>)
+  — registered the new `'salon-booking'` section.
+- `messages/en.json`, `messages/es.json`, `messages/ko.json` — new
+  keys for the node label/form and the settings panel.
+- [src/lib/flows/engine.test.ts](src/lib/flows/engine.test.ts),
+  [validate.test.ts](src/lib/flows/validate.test.ts),
+  [src/components/flows/flow-editor-state.test.ts](src/components/flows/flow-editor-state.test.ts)
+  — new cases, including unit tests for the newly-exported pure
+  `parseSalonDateTime` helper (this repo's existing pattern for testing
+  engine logic without a Supabase/fetch mock).
+
+While fixing an unrelated i18n test failure surfaced by this work's
+`npx vitest run src/i18n/messages.test.ts` run, found and fixed a
+**pre-existing gap in `es.json`**: 18 keys (`Automations.builder.config.
+matchWord`/`matchWordHint`, all of `Inbox.mediaViewer.*`, 5 of
+`Inbox.bubble.*`) that the `es.json` creation session (see the entry
+above) had missed — unrelated to salon booking, just something the
+parity-test gate happened to catch while this session was already
+running it.
+
+Verified: `npm run typecheck`, `npx eslint` (0 errors, only pre-existing
+warnings), `npx vitest run` for the **full** suite — 727/729 pass; the 2
+failures (`src/lib/dashboard/date-utils.test.ts`, `mondayIndex`) are
+pre-existing, unrelated (confirmed via `git status`/`git diff` — that
+file was never touched this session) and look like environment
+timezone-dependent flakiness in a `new Date("2026-05-18")` parse, not a
+regression from this change.
+
+> **Migration required for self-hosters:** apply
+> `supabase/migrations/038_salon_booking.sql`, then generate a Sanctum
+> Personal Access Token on the salon backend and enter it (+ the base
+> URL and the placeholder client/status/service ids) in Settings →
+> Salon booking before cloning/activating the `book_appointment`
+> template. Not verified end-to-end against a real salon backend or a
+> real WhatsApp number this session — the user still needs to supply
+> the actual token, base URL, and placeholder ids, and confirm a live
+> booking round-trip.

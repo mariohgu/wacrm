@@ -32,6 +32,7 @@
  *     INSERT raises 23505 and the runner catches & exits.
  */
 
+import { parse as parseDate, isValid as isValidDate, format as formatDate, addMinutes } from "date-fns";
 import { supabaseAdmin } from "./admin-client";
 import {
   engineSendInteractiveButtons,
@@ -42,9 +43,16 @@ import {
 import { decideFallback, resolveFallbackPolicy } from "./fallback";
 import { addContactTagAndDispatch } from "@/lib/contacts/tag-events";
 import { removeContactTag } from "@/lib/contacts/tag-write";
+import { loadSalonBookingConfig } from "@/lib/salon-booking/config";
+import {
+  createAppointment,
+  SalonBookingError,
+  type SalonAppointmentPayload,
+} from "@/lib/salon-booking/client";
 import {
   type CollectInputNodeConfig,
   type ConditionNodeConfig,
+  type CreateSalonAppointmentNodeConfig,
   type DispatchInboundInput,
   type DispatchInboundResult,
   type FlowNodeRow,
@@ -59,6 +67,25 @@ import {
   type StartNodeConfig,
   type KeywordTriggerConfig,
 } from "./types";
+
+// Fixed input formats for create_salon_appointment — there's no NLP/AI
+// date parsing in v1 (guided-flow only), so the preceding collect_input
+// prompts must ask for exactly these formats (see the seed template).
+const SALON_DATE_FORMAT = "dd/MM/yyyy";
+const SALON_TIME_FORMAT = "HH:mm";
+
+/**
+ * Strictly parse the two collected vars into one Date. Returns null on
+ * any parse failure rather than guessing — the node routes that to
+ * `error_next_node_key`.
+ */
+export function parseSalonDateTime(dateStr: string, timeStr: string): Date | null {
+  const datePart = parseDate(dateStr.trim(), SALON_DATE_FORMAT, new Date());
+  if (!isValidDate(datePart)) return null;
+  const combined = parseDate(timeStr.trim(), SALON_TIME_FORMAT, datePart);
+  if (!isValidDate(combined)) return null;
+  return combined;
+}
 
 // ============================================================
 // Pure helpers — extracted so engine.test.ts can exercise them
@@ -118,7 +145,8 @@ export function isAutoAdvancing(node_type: string): boolean {
     node_type === "send_message" ||
     node_type === "send_media" ||
     node_type === "condition" ||
-    node_type === "set_tag"
+    node_type === "set_tag" ||
+    node_type === "create_salon_appointment"
   );
 }
 
@@ -734,6 +762,95 @@ async function advanceFromNodeKey(
           reason: "set_tag_failed",
           detail: err instanceof Error ? err.message : String(err),
         });
+      }
+      currentKey = cfg.next_node_key;
+      continue;
+    }
+    if (node.node_type === "create_salon_appointment") {
+      const cfg = node.config as unknown as CreateSalonAppointmentNodeConfig;
+      try {
+        const bookingConfig = await loadSalonBookingConfig(db, run.account_id);
+        if (!bookingConfig) {
+          throw new Error("salon_booking_not_configured");
+        }
+        const dateStr = String(run.vars[cfg.date_var_key] ?? "");
+        const timeStr = String(run.vars[cfg.time_var_key] ?? "");
+        const start = parseSalonDateTime(dateStr, timeStr);
+        if (!start) {
+          throw new Error("unparseable_date_time");
+        }
+        const end = addMinutes(start, cfg.duration_minutes);
+
+        const { data: contactRow } = await db
+          .from("contacts")
+          .select("name, phone")
+          .eq("id", run.contact_id!)
+          .maybeSingle();
+        const contact = contactRow as { name?: string | null; phone?: string | null } | null;
+
+        // notas_cliente is built automatically, not admin-templated —
+        // guarantees the contact + requested date/time always land in
+        // the salon system's notes, even if the flow author forgets to
+        // ask for anything else.
+        const notesLines = [
+          "Reserva generada automáticamente vía WhatsApp.",
+          `Cliente: ${contact?.name ?? "(sin nombre)"} (${contact?.phone ?? "sin teléfono"})`,
+          `Fecha solicitada: ${formatDate(start, SALON_DATE_FORMAT)} ${formatDate(start, SALON_TIME_FORMAT)}`,
+        ];
+        for (const key of cfg.extra_notes_var_keys ?? []) {
+          const v = run.vars[key];
+          if (v !== undefined && v !== null && String(v).trim() !== "") {
+            notesLines.push(`${key}: ${String(v)}`);
+          }
+        }
+
+        const payload: SalonAppointmentPayload = {
+          id_cliente: bookingConfig.defaultClienteId,
+          id_staff: bookingConfig.defaultStaffId,
+          id_estado_cita: bookingConfig.defaultEstadoId,
+          fecha_cita: formatDate(start, "yyyy-MM-dd"),
+          hora_inicio: formatDate(start, SALON_TIME_FORMAT),
+          hora_fin: formatDate(end, SALON_TIME_FORMAT),
+          origen_reserva: "whatsapp",
+          notas_cliente: notesLines.join("\n"),
+          notas_internas: "",
+          requiere_confirmacion: true,
+          servicios: [
+            {
+              id_servicio: bookingConfig.defaultServicioId,
+              precio_servicio: bookingConfig.defaultServicioPrecio,
+              duracion_minutos: cfg.duration_minutes,
+              orden: 1,
+              notas: "",
+            },
+          ],
+        };
+
+        const { appointmentId } = await createAppointment(bookingConfig, payload);
+        await logEvent(db, run.id, "node_entered", node.node_key, {
+          node_type: "create_salon_appointment",
+          appointment_id: appointmentId,
+        });
+        if (appointmentId) {
+          const newVars = { ...run.vars, appointment_id: appointmentId };
+          await db.from("flow_runs").update({ vars: newVars }).eq("id", run.id);
+          run.vars = newVars;
+        }
+      } catch (err) {
+        const detail =
+          err instanceof SalonBookingError || err instanceof Error
+            ? err.message
+            : String(err);
+        await logEvent(db, run.id, "error", node.node_key, {
+          reason: "create_salon_appointment_failed",
+          detail,
+        });
+        if (cfg.error_next_node_key) {
+          currentKey = cfg.error_next_node_key;
+          continue;
+        }
+        await endRun(db, run.id, "failed", "create_salon_appointment_failed");
+        return { outcome: "completed" };
       }
       currentKey = cfg.next_node_key;
       continue;

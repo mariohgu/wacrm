@@ -138,6 +138,29 @@ export function deriveCanvasEdges(nodes: BuilderNode[]): CanvasEdge[] {
         break;
       }
 
+      case "create_salon_appointment": {
+        const c = cfg as { next_node_key?: string; error_next_node_key?: string };
+        if (c.next_node_key && knownKeys.has(c.next_node_key)) {
+          edges.push({
+            id: `${node.node_key}--next--${c.next_node_key}`,
+            source: node.node_key,
+            target: c.next_node_key,
+            sourceHandle: "next",
+            label: "booked",
+          });
+        }
+        if (c.error_next_node_key && knownKeys.has(c.error_next_node_key)) {
+          edges.push({
+            id: `${node.node_key}--error--${c.error_next_node_key}`,
+            source: node.node_key,
+            target: c.error_next_node_key,
+            sourceHandle: "error",
+            label: "error",
+          });
+        }
+        break;
+      }
+
       case "handoff":
       case "end":
         // Terminal nodes — no outgoing edges.
@@ -226,6 +249,12 @@ export function outgoingSlots(node: BuilderNode): OutgoingSlot[] {
       return slots;
     }
 
+    case "create_salon_appointment":
+      return [
+        { id: "next", label: "Booked" },
+        { id: "error", label: "Error" },
+      ];
+
     case "handoff":
     case "end":
       return [];
@@ -309,6 +338,11 @@ export function applyEdgeConnection(
       });
       return matched ? { sections: next } : null;
     }
+
+    case "create_salon_appointment":
+      if (sourceHandle === "next") return { next_node_key: targetKey };
+      if (sourceHandle === "error") return { error_next_node_key: targetKey };
+      return null;
 
     case "handoff":
     case "end":
@@ -402,6 +436,18 @@ function patchedConfigWithoutKey(
         };
       });
       return dirty ? { ...cfg, sections: next } : null;
+    }
+
+    case "create_salon_appointment": {
+      const c = cfg as { next_node_key?: string; error_next_node_key?: string };
+      const nextMatch = c.next_node_key === deletedKey;
+      const errorMatch = c.error_next_node_key === deletedKey;
+      if (!nextMatch && !errorMatch) return null;
+      return {
+        ...cfg,
+        ...(nextMatch ? { next_node_key: "" } : {}),
+        ...(errorMatch ? { error_next_node_key: "" } : {}),
+      };
     }
 
     case "handoff":

@@ -216,7 +216,25 @@
       "interactiveReply": "[Respuesta interactiva]",
       "unsupported": "[Tipo de mensaje no compatible]",
       "aiBadge": "IA",
-      "aiBadgeTitle": "Enviado automáticamente por el asistente de IA"
+      "aiBadgeTitle": "Enviado automáticamente por el asistente de IA",
+      "download": "Descargar",
+      "downloadFailed": "No se pudo descargar el archivo adjunto",
+      "viewImage": "Ver imagen",
+      "expandVideo": "Ampliar video",
+      "imageAlt": "Imagen compartida"
+    },
+    "mediaViewer": {
+      "counter": "{index} de {total}",
+      "previous": "Anterior",
+      "next": "Siguiente",
+      "zoomIn": "Ampliar a tamaño completo",
+      "zoomOut": "Ajustar a la pantalla",
+      "openOriginal": "Abrir original",
+      "download": "Descargar",
+      "downloadFailed": "No se pudo descargar el archivo adjunto",
+      "failed": "Este archivo adjunto ya no está disponible",
+      "imageAlt": "Imagen compartida",
+      "you": "Tú"
     },
     "actions": {
       "reply": "Responder",
@@ -973,6 +991,8 @@
         "placeholderBody": "{\"id\": \"{{ contact.id }}\"}",
         "matchType": "Tipo de coincidencia",
         "matchContains": "Contiene",
+        "matchWord": "Palabra completa",
+        "matchWordHint": "Coincide con la palabra clave solo como palabra independiente, así \"k\" ya no coincide con \"gracias\". Ideal para palabras clave cortas en idiomas separados por espacios; usa \"Contiene\" para idiomas escritos sin espacios.",
         "matchExact": "Exacto",
         "closeConversationHint": "Establece el estado de la conversación en \"cerrada\". No requiere configuración."
       }
@@ -1119,7 +1139,16 @@
         "filenamePlaceholder": "factura.pdf",
         "advanceAfterSending": "Después de enviar, avanza a",
         "pickNextNode": "Elige un nodo siguiente…",
-        "none": "— Ninguno —"
+        "none": "— Ninguno —",
+        "salonAppointmentHelp": "Registra una cita pendiente en el sistema del salón usando los valores por defecto configurados en la cuenta (Configuración → Reservas del salón).",
+        "dateVarKeyLabel": "Variable con la fecha",
+        "timeVarKeyLabel": "Variable con la hora",
+        "salonAppointmentFormatHint": "Asegúrate de que los prompts de \"Recopilar entrada\" anteriores pidan exactamente DD/MM/AAAA y HH:MM (24h) — no hay interpretación libre de fechas.",
+        "durationMinutesLabel": "Duración (minutos)",
+        "extraNotesVarKeysLabel": "Variables extra a incluir en las notas",
+        "extraNotesVarKeysHelp": "Claves de variable separadas por comas. El nombre/teléfono del contacto y la fecha/hora solicitadas se incluyen siempre automáticamente.",
+        "onBookedAdvance": "Al reservar, avanza a",
+        "onErrorAdvance": "En caso de error, avanza a"
       },
       "categories": {
         "messaging": "Mensajería",
@@ -1162,6 +1191,10 @@
         "handoff": {
           "label": "Transferir a un agente",
           "blurb": "Pasa la conversación a una persona"
+        },
+        "create_salon_appointment": {
+          "label": "Reservar cita",
+          "blurb": "Registra una cita pendiente en el sistema del salón"
         },
         "end": {
           "label": "Fin",
@@ -1507,7 +1540,8 @@
       "fields": "Campos y etiquetas",
       "deals": "Tratos y moneda",
       "members": "Miembros del equipo",
-      "api": "Claves de API"
+      "api": "Claves de API",
+      "salon-booking": "Reservas del salón"
     },
     "groups": {
       "account": "Cuenta",
@@ -1628,6 +1662,43 @@
       "saving": "Guardando...",
       "saveFailed": "Error al guardar la moneda predeterminada",
       "saveSuccess": "Moneda predeterminada actualizada"
+    },
+    "salonBooking": {
+      "title": "Reservas del salón",
+      "description": "Conecta la API propia de citas del salón para que el bot de WhatsApp pueda registrar una reserva pendiente automáticamente, usando un cliente/servicio genérico que tu equipo confirmará.",
+      "adminOnlyConfig": "Solo los administradores y propietarios pueden cambiar esta configuración.",
+      "loading": "Cargando…",
+      "loadFailed": "Error al cargar la configuración de reservas del salón",
+      "connectionCard": "Conexión",
+      "encryptionNotice": "El token se cifra en reposo (AES-256-GCM) y nunca vuelve a mostrarse después de guardarlo.",
+      "baseUrl": "URL base de la API",
+      "apiToken": "Token de la API",
+      "tokenPlaceholder": "Token Bearer",
+      "tokenHint": "Un Personal Access Token de Sanctum del backend Laravel del salón, no el usuario que usas en su propio panel.",
+      "testConnection": "Probar conexión",
+      "testSuccess": "La conexión funciona.",
+      "testRejected": "La API del salón rechazó la solicitud.",
+      "testNetworkError": "No se pudo conectar con la API del salón.",
+      "defaultsCard": "Valores genéricos por defecto",
+      "defaultsDesc": "Toda reserva originada en WhatsApp usa estos ids y queda marcada como \"pendiente\" — una persona la confirma o reasigna en el sistema del salón.",
+      "defaultClienteId": "ID de cliente por defecto",
+      "defaultEstadoId": "ID de estado por defecto (\"Pendiente\")",
+      "defaultServicioId": "ID de servicio por defecto",
+      "defaultStaffId": "ID de staff por defecto",
+      "defaultStaffIdPlaceholder": "Déjalo vacío para \"Sin asignar\"",
+      "defaultServicioPrecio": "Precio del servicio por defecto",
+      "defaultServicioDuracion": "Duración del servicio por defecto (minutos)",
+      "enableBooking": "Habilitar reservas automáticas",
+      "enableBookingDesc": "Cuando está apagado, el paso de crear cita en el Flow falla de forma segura en vez de llamar a la API del salón.",
+      "remove": "Eliminar",
+      "save": "Guardar",
+      "saveSuccess": "Configuración de reservas del salón guardada",
+      "saveFailed": "Error al guardar la configuración de reservas del salón",
+      "removeSuccess": "Configuración de reservas del salón eliminada",
+      "removeFailed": "Error al eliminar la configuración de reservas del salón",
+      "missingBaseUrl": "Introduce la URL base de la API",
+      "missingDefaults": "Los IDs de cliente, estado y servicio son obligatorios",
+      "missingToken": "Introduce un token de la API"
     },
     "aiConfig": {
       "title": "Configuración del agente",

@@ -91,6 +91,7 @@ describe("defaultConfigFor", () => {
     "condition",
     "set_tag",
     "handoff",
+    "create_salon_appointment",
     "end",
   ];
 
@@ -130,5 +131,18 @@ describe("defaultConfigFor", () => {
 
   it("end's default is an empty object (terminal — no config)", () => {
     expect(defaultConfigFor("end")).toEqual({});
+  });
+
+  it("create_salon_appointment defaults to a sane duration and no target picked", () => {
+    const cfg = defaultConfigFor("create_salon_appointment") as {
+      date_var_key?: string;
+      time_var_key?: string;
+      duration_minutes?: number;
+      next_node_key?: string;
+    };
+    expect(cfg.duration_minutes).toBeGreaterThan(0);
+    expect(cfg.date_var_key).toBe("");
+    expect(cfg.time_var_key).toBe("");
+    expect(cfg.next_node_key).toBe("");
   });
 });

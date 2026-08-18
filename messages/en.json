@@ -1139,7 +1139,16 @@
         "filenamePlaceholder": "invoice.pdf",
         "advanceAfterSending": "After sending, advance to",
         "pickNextNode": "Pick a next node…",
-        "none": "— None —"
+        "none": "— None —",
+        "salonAppointmentHelp": "Registers a pending appointment in the salon system using the account's configured defaults (Settings → Salon booking).",
+        "dateVarKeyLabel": "Var holding the date",
+        "timeVarKeyLabel": "Var holding the time",
+        "salonAppointmentFormatHint": "Make sure the collect-input prompts above ask for exactly DD/MM/YYYY and HH:MM (24h) — there's no free-form date parsing.",
+        "durationMinutesLabel": "Duration (minutes)",
+        "extraNotesVarKeysLabel": "Extra vars to include in notes",
+        "extraNotesVarKeysHelp": "Comma-separated var keys. The contact's name/phone and the requested date/time are always included automatically.",
+        "onBookedAdvance": "Once booked, advance to",
+        "onErrorAdvance": "On error, advance to"
       },
       "categories": {
         "messaging": "Messaging",
@@ -1182,6 +1191,10 @@
         "handoff": {
           "label": "Handoff to agent",
           "blurb": "Hands the conversation to a human"
+        },
+        "create_salon_appointment": {
+          "label": "Book appointment",
+          "blurb": "Registers a pending appointment in the salon system"
         },
         "end": {
           "label": "End",
@@ -1527,7 +1540,8 @@
       "fields": "Fields & tags",
       "deals": "Deals & currency",
       "members": "Team members",
-      "api": "API keys"
+      "api": "API keys",
+      "salon-booking": "Salon booking"
     },
     "groups": {
       "account": "Account",
@@ -1648,6 +1662,43 @@
       "saving": "Saving...",
       "saveFailed": "Failed to save default currency",
       "saveSuccess": "Default currency updated"
+    },
+    "salonBooking": {
+      "title": "Salon booking",
+      "description": "Connect the salon's own appointment API so the WhatsApp bot can register a pending booking automatically, using a generic client/service placeholder your staff will confirm.",
+      "adminOnlyConfig": "Only admins and owners can change this configuration.",
+      "loading": "Loading…",
+      "loadFailed": "Failed to load salon booking configuration",
+      "connectionCard": "Connection",
+      "encryptionNotice": "The token is encrypted at rest (AES-256-GCM) and never shown again after saving.",
+      "baseUrl": "API base URL",
+      "apiToken": "API token",
+      "tokenPlaceholder": "Bearer token",
+      "tokenHint": "A Sanctum Personal Access Token from the salon's Laravel backend, not the login you use in its own dashboard.",
+      "testConnection": "Test connection",
+      "testSuccess": "Connection works.",
+      "testRejected": "The salon API rejected the request.",
+      "testNetworkError": "Could not reach the salon API.",
+      "defaultsCard": "Placeholder defaults",
+      "defaultsDesc": "Every WhatsApp-originated booking uses these ids and is marked \"pending\" — a human confirms or reassigns it in the salon system.",
+      "defaultClienteId": "Default client id",
+      "defaultEstadoId": "Default status id (\"Pending\")",
+      "defaultServicioId": "Default service id",
+      "defaultStaffId": "Default staff id",
+      "defaultStaffIdPlaceholder": "Leave blank for unassigned",
+      "defaultServicioPrecio": "Default service price",
+      "defaultServicioDuracion": "Default service duration (minutes)",
+      "enableBooking": "Enable automatic booking",
+      "enableBookingDesc": "When off, the create-appointment Flow step fails safely instead of calling the salon API.",
+      "remove": "Remove",
+      "save": "Save",
+      "saveSuccess": "Salon booking configuration saved",
+      "saveFailed": "Failed to save salon booking configuration",
+      "removeSuccess": "Salon booking configuration removed",
+      "removeFailed": "Failed to remove salon booking configuration",
+      "missingBaseUrl": "Enter the API base URL",
+      "missingDefaults": "Client, status, and service ids are required",
+      "missingToken": "Enter an API token"
     },
     "aiConfig": {
       "title": "Agent setup",

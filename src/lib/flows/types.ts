@@ -173,6 +173,37 @@ export interface SetTagNodeConfig {
   next_node_key: string;
 }
 
+/**
+ * Registers a "pending" appointment against an external salon-management
+ * API (a separate system, see src/lib/salon-booking/) using a generic
+ * client/service/staff placeholder configured per-account in
+ * `salon_booking_configs` — this node never asks the customer for
+ * anything beyond what earlier `collect_input` nodes already captured.
+ *
+ * Date/time are parsed strictly against the fixed formats the seed
+ * template's prompts ask for (`dd/MM/yyyy`, `HH:mm`) — there is no
+ * NLP/AI date parsing in v1, so the preceding `collect_input` prompts
+ * must state the expected format explicitly.
+ */
+export interface CreateSalonAppointmentNodeConfig {
+  /** flow_runs.vars key holding the requested date, e.g. "desired_date". */
+  date_var_key: string;
+  /** flow_runs.vars key holding the requested time, e.g. "desired_time". */
+  time_var_key: string;
+  /** Should match the real duration of the configured placeholder service. */
+  duration_minutes: number;
+  /** Additional vars.* keys to fold into notas_cliente (e.g. a free-text
+   *  "what service?" answer), beyond the contact + date/time that are
+   *  always included automatically. */
+  extra_notes_var_keys?: string[];
+  /** Node to advance to once the appointment is created. */
+  next_node_key: string;
+  /** Node to advance to on missing config / unparseable date-time /
+   *  API failure. When unset, the run ends as failed rather than
+   *  silently continuing as if the booking succeeded. */
+  error_next_node_key?: string;
+}
+
 // Terminal nodes carry no config — they just stop the run.
 export type EndNodeConfig = Record<string, never>;
 
@@ -194,6 +225,7 @@ export type FlowNodeConfig =
   | { node_type: "condition"; config: ConditionNodeConfig }
   | { node_type: "set_tag"; config: SetTagNodeConfig }
   | { node_type: "handoff"; config: HandoffNodeConfig }
+  | { node_type: "create_salon_appointment"; config: CreateSalonAppointmentNodeConfig }
   | { node_type: "end"; config: EndNodeConfig };
 
 export type FlowNodeType = FlowNodeConfig["node_type"];

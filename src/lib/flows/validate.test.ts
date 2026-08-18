@@ -516,6 +516,157 @@ describe("validateFlowForActivation — send_media", () => {
   });
 });
 
+describe("validateFlowForActivation — create_salon_appointment", () => {
+  const baseFlow = { ...validFlow, entry_node_id: "s" };
+  const nodesWith = (cfg: Record<string, unknown>) => [
+    { node_key: "s", node_type: "start", config: { next_node_key: "book" } },
+    { node_key: "book", node_type: "create_salon_appointment", config: cfg },
+    { node_key: "confirmed", node_type: "end", config: {} },
+    { node_key: "error", node_type: "handoff", config: {} },
+  ];
+
+  it("passes on a fully-populated node", () => {
+    const issues = validateFlowForActivation(
+      baseFlow,
+      nodesWith({
+        date_var_key: "desired_date",
+        time_var_key: "desired_time",
+        duration_minutes: 30,
+        next_node_key: "confirmed",
+        error_next_node_key: "error",
+      }),
+    );
+    expect(issues).toEqual([]);
+  });
+
+  it("flags missing date_var_key", () => {
+    const issues = validateFlowForActivation(
+      baseFlow,
+      nodesWith({
+        time_var_key: "desired_time",
+        duration_minutes: 30,
+        next_node_key: "confirmed",
+      }),
+    );
+    expect(
+      issues.some((i) => i.node_key === "book" && i.field === "date_var_key"),
+    ).toBe(true);
+  });
+
+  it("flags missing time_var_key", () => {
+    const issues = validateFlowForActivation(
+      baseFlow,
+      nodesWith({
+        date_var_key: "desired_date",
+        duration_minutes: 30,
+        next_node_key: "confirmed",
+      }),
+    );
+    expect(
+      issues.some((i) => i.node_key === "book" && i.field === "time_var_key"),
+    ).toBe(true);
+  });
+
+  it("flags zero/negative duration_minutes", () => {
+    const issues = validateFlowForActivation(
+      baseFlow,
+      nodesWith({
+        date_var_key: "desired_date",
+        time_var_key: "desired_time",
+        duration_minutes: 0,
+        next_node_key: "confirmed",
+      }),
+    );
+    expect(
+      issues.some(
+        (i) => i.node_key === "book" && i.field === "duration_minutes",
+      ),
+    ).toBe(true);
+  });
+
+  it("flags missing next_node_key", () => {
+    const issues = validateFlowForActivation(
+      baseFlow,
+      nodesWith({
+        date_var_key: "desired_date",
+        time_var_key: "desired_time",
+        duration_minutes: 30,
+      }),
+    );
+    expect(
+      issues.some((i) => i.node_key === "book" && i.field === "next_node_key"),
+    ).toBe(true);
+  });
+
+  it("flags next_node_key pointing at a non-existent node", () => {
+    const issues = validateFlowForActivation(
+      baseFlow,
+      nodesWith({
+        date_var_key: "desired_date",
+        time_var_key: "desired_time",
+        duration_minutes: 30,
+        next_node_key: "ghost",
+      }),
+    );
+    expect(
+      issues.some(
+        (i) =>
+          i.node_key === "book" &&
+          i.field === "next_node_key" &&
+          i.message.includes("ghost"),
+      ),
+    ).toBe(true);
+  });
+
+  it("flags error_next_node_key pointing at a non-existent node (when set)", () => {
+    const issues = validateFlowForActivation(
+      baseFlow,
+      nodesWith({
+        date_var_key: "desired_date",
+        time_var_key: "desired_time",
+        duration_minutes: 30,
+        next_node_key: "confirmed",
+        error_next_node_key: "ghost",
+      }),
+    );
+    expect(
+      issues.some(
+        (i) =>
+          i.node_key === "book" &&
+          i.field === "error_next_node_key" &&
+          i.message.includes("ghost"),
+      ),
+    ).toBe(true);
+  });
+
+  it("doesn't require error_next_node_key", () => {
+    const issues = validateFlowForActivation(
+      baseFlow,
+      nodesWith({
+        date_var_key: "desired_date",
+        time_var_key: "desired_time",
+        duration_minutes: 30,
+        next_node_key: "confirmed",
+      }),
+    );
+    expect(issues.filter((i) => i.node_key === "book")).toEqual([]);
+  });
+
+  it("contributes both next_node_key and error_next_node_key to reachability", () => {
+    const set = reachableFromEntry(
+      "s",
+      nodesWith({
+        date_var_key: "desired_date",
+        time_var_key: "desired_time",
+        duration_minutes: 30,
+        next_node_key: "confirmed",
+        error_next_node_key: "error",
+      }),
+    );
+    expect(set).toEqual(new Set(["s", "book", "confirmed", "error"]));
+  });
+});
+
 describe("reachableFromEntry", () => {
   it("walks the graph from the entry", () => {
     const set = reachableFromEntry("start", validNodes);

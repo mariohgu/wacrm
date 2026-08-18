@@ -205,6 +205,17 @@ export function NodeConfigForm({
         />
       );
 
+    case "create_salon_appointment":
+      return (
+        <CreateSalonAppointmentForm
+          cfg={cfg as CreateSalonAppointmentCfg}
+          allNodes={allNodes}
+          currentKey={node.node_key}
+          onUpdateConfig={onUpdateConfig}
+          t={t}
+        />
+      );
+
     case "end":
       return (
         <p className="text-xs text-muted-foreground">
@@ -831,6 +842,126 @@ function SetTagForm({
         currentKey={currentKey}
         onChange={(v) => onUpdateConfig({ next_node_key: v })}
         label={t("thenAdvanceTo")}
+      />
+    </>
+  );
+}
+
+// ============================================================
+// create_salon_appointment
+// ============================================================
+
+interface CreateSalonAppointmentCfg {
+  date_var_key?: string;
+  time_var_key?: string;
+  duration_minutes?: number;
+  extra_notes_var_keys?: string[];
+  next_node_key?: string;
+  error_next_node_key?: string;
+}
+
+function CreateSalonAppointmentForm({
+  cfg,
+  allNodes,
+  currentKey,
+  onUpdateConfig,
+  t,
+}: {
+  cfg: CreateSalonAppointmentCfg;
+  allNodes: BuilderNode[];
+  currentKey: string;
+  onUpdateConfig: (patch: Record<string, unknown>) => void;
+  t: ReturnType<typeof useTranslations>;
+}) {
+  return (
+    <>
+      <p className="text-xs text-muted-foreground">{t("salonAppointmentHelp")}</p>
+      <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+        <div>
+          <label className="mb-1 block text-xs text-muted-foreground">
+            {t("dateVarKeyLabel")}
+          </label>
+          <Input
+            value={cfg.date_var_key ?? ""}
+            onChange={(e) =>
+              onUpdateConfig({
+                date_var_key: e.target.value.replace(/[^a-zA-Z0-9_]/g, ""),
+              })
+            }
+            placeholder="desired_date"
+            className="bg-muted font-mono text-xs"
+          />
+        </div>
+        <div>
+          <label className="mb-1 block text-xs text-muted-foreground">
+            {t("timeVarKeyLabel")}
+          </label>
+          <Input
+            value={cfg.time_var_key ?? ""}
+            onChange={(e) =>
+              onUpdateConfig({
+                time_var_key: e.target.value.replace(/[^a-zA-Z0-9_]/g, ""),
+              })
+            }
+            placeholder="desired_time"
+            className="bg-muted font-mono text-xs"
+          />
+        </div>
+      </div>
+      <p className="text-[10px] text-muted-foreground">
+        {t("salonAppointmentFormatHint")}
+      </p>
+
+      <div>
+        <label className="mb-1 block text-xs text-muted-foreground">
+          {t("durationMinutesLabel")}
+        </label>
+        <Input
+          type="number"
+          min={1}
+          value={cfg.duration_minutes ?? 30}
+          onChange={(e) =>
+            onUpdateConfig({ duration_minutes: Number(e.target.value) || 0 })
+          }
+          className="bg-muted w-32"
+        />
+      </div>
+
+      <div>
+        <label className="mb-1 block text-xs text-muted-foreground">
+          {t("extraNotesVarKeysLabel")}
+        </label>
+        <Input
+          value={(cfg.extra_notes_var_keys ?? []).join(", ")}
+          onChange={(e) =>
+            onUpdateConfig({
+              extra_notes_var_keys: e.target.value
+                .split(",")
+                .map((s) => s.trim())
+                .filter(Boolean),
+            })
+          }
+          placeholder="desired_service, notes"
+          className="bg-muted text-xs"
+        />
+        <p className="mt-1 text-[10px] text-muted-foreground">
+          {t("extraNotesVarKeysHelp")}
+        </p>
+      </div>
+
+      <NextNodeRow
+        value={cfg.next_node_key ?? ""}
+        allNodes={allNodes}
+        currentKey={currentKey}
+        onChange={(v) => onUpdateConfig({ next_node_key: v })}
+        label={t("onBookedAdvance")}
+      />
+      <NextNodeRow
+        value={cfg.error_next_node_key ?? ""}
+        allNodes={allNodes}
+        currentKey={currentKey}
+        onChange={(v) => onUpdateConfig({ error_next_node_key: v })}
+        label={t("onErrorAdvance")}
       />
     </>
   );

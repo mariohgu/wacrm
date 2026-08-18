@@ -701,6 +701,70 @@ function validateNode(
       break;
     }
 
+    case "create_salon_appointment": {
+      const cfg = node.config as {
+        date_var_key?: string;
+        time_var_key?: string;
+        duration_minutes?: number;
+        next_node_key?: string;
+        error_next_node_key?: string;
+      };
+      if (!cfg.date_var_key?.trim()) {
+        issues.push({
+          severity: "error",
+          scope: "node",
+          node_key: node.node_key,
+          field: "date_var_key",
+          message: "Pick which captured var holds the requested date.",
+        });
+      }
+      if (!cfg.time_var_key?.trim()) {
+        issues.push({
+          severity: "error",
+          scope: "node",
+          node_key: node.node_key,
+          field: "time_var_key",
+          message: "Pick which captured var holds the requested time.",
+        });
+      }
+      if (!cfg.duration_minutes || cfg.duration_minutes <= 0) {
+        issues.push({
+          severity: "error",
+          scope: "node",
+          node_key: node.node_key,
+          field: "duration_minutes",
+          message: "Duration must be a positive number of minutes.",
+        });
+      }
+      if (!cfg.next_node_key) {
+        issues.push({
+          severity: "error",
+          scope: "node",
+          node_key: node.node_key,
+          field: "next_node_key",
+          message: "Create-appointment must point to a next node on success.",
+        });
+      } else if (!knownKeys.has(cfg.next_node_key)) {
+        issues.push({
+          severity: "error",
+          scope: "node",
+          node_key: node.node_key,
+          field: "next_node_key",
+          message: `Create-appointment points to non-existent node "${cfg.next_node_key}".`,
+        });
+      }
+      if (cfg.error_next_node_key && !knownKeys.has(cfg.error_next_node_key)) {
+        issues.push({
+          severity: "error",
+          scope: "node",
+          node_key: node.node_key,
+          field: "error_next_node_key",
+          message: `Create-appointment's error path points to non-existent node "${cfg.error_next_node_key}".`,
+        });
+      }
+      break;
+    }
+
     case "handoff":
     case "end":
       // Terminal nodes have no outgoing edges; nothing to validate
@@ -783,6 +847,16 @@ function outgoingEdges(node: NodeInput): string[] {
           if (r.next_node_key) out.push(r.next_node_key);
         }
       }
+      return out;
+    }
+    case "create_salon_appointment": {
+      const cfg = node.config as {
+        next_node_key?: string;
+        error_next_node_key?: string;
+      };
+      const out: string[] = [];
+      if (cfg.next_node_key) out.push(cfg.next_node_key);
+      if (cfg.error_next_node_key) out.push(cfg.error_next_node_key);
       return out;
     }
     case "handoff":

@@ -17,6 +17,7 @@
  */
 
 import {
+  CalendarCheck,
   Flag,
   GitFork,
   Inbox,
@@ -50,6 +51,7 @@ export type NodeType =
   | 'condition'
   | 'set_tag'
   | 'handoff'
+  | 'create_salon_appointment'
   | 'end';
 
 export interface BuilderNode {
@@ -159,6 +161,13 @@ export const NODE_META: Record<
     blurb: 'Hands the conversation to a human',
     category: 'flow',
   },
+  create_salon_appointment: {
+    label: 'Book appointment',
+    icon: CalendarCheck,
+    color: 'text-lime-400',
+    blurb: 'Registers a pending appointment in the salon system',
+    category: 'logic',
+  },
   end: {
     label: 'End',
     icon: Flag,
@@ -206,6 +215,7 @@ const NODE_HUE: Record<NodeType, { l: number; c: number; h: number }> = {
   condition: { l: 0.72, c: 0.15, h: 65 }, // amber — a fork in the road
   set_tag: { l: 0.65, c: 0.15, h: 350 }, // pink
   handoff: { l: 0.65, c: 0.17, h: 16 }, // rose — hands off
+  create_salon_appointment: { l: 0.68, c: 0.15, h: 130 }, // lime — books something
   end: { l: 0.55, c: 0.01, h: 260 }, // neutral grey — terminal
 };
 
@@ -423,6 +433,14 @@ export function summarizeNode(
     case 'handoff': {
       const note = typeof cfg.note === 'string' ? cfg.note : '';
       return note.length > 0 ? truncate(note) : null;
+    }
+    case 'create_salon_appointment': {
+      const dateKey = typeof cfg.date_var_key === 'string' ? cfg.date_var_key : '';
+      const timeKey = typeof cfg.time_var_key === 'string' ? cfg.time_var_key : '';
+      const duration = typeof cfg.duration_minutes === 'number' ? cfg.duration_minutes : null;
+      if (!dateKey && !timeKey) return null;
+      const vars = [dateKey, timeKey].filter(Boolean).map((k) => `vars.${k}`).join(' + ');
+      return duration ? `${vars} · ${duration} min` : vars;
     }
   }
 }

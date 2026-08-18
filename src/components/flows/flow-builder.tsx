@@ -590,6 +590,7 @@ function AddNodeButton({ onAdd, t }: { onAdd: (type: NodeType) => void; t: Retur
     'condition',
     'set_tag',
     'handoff',
+    'create_salon_appointment',
     'end',
   ];
   return (

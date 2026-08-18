@@ -22,6 +22,7 @@
 import type {
   CollectInputNodeConfig,
   ConditionNodeConfig,
+  CreateSalonAppointmentNodeConfig,
   HandoffNodeConfig,
   KeywordTriggerConfig,
   SendButtonsNodeConfig,
@@ -39,6 +40,7 @@ export type FlowTemplateNodeType =
   | "condition"
   | "set_tag"
   | "handoff"
+  | "create_salon_appointment"
   | "end";
 
 export interface FlowTemplateNode {
@@ -52,6 +54,7 @@ export interface FlowTemplateNode {
     | CollectInputNodeConfig
     | ConditionNodeConfig
     | HandoffNodeConfig
+    | CreateSalonAppointmentNodeConfig
     | Record<string, unknown>;
 }
 
@@ -60,7 +63,7 @@ export interface FlowTemplate {
   name: string;
   description: string;
   /** Used by the gallery to surface a relevant icon. lucide-react name. */
-  icon: "MessageSquare" | "HelpCircle" | "UserPlus";
+  icon: "MessageSquare" | "HelpCircle" | "UserPlus" | "CalendarCheck";
   trigger_type: "keyword" | "first_inbound_message" | "manual";
   trigger_config: KeywordTriggerConfig | Record<string, unknown>;
   entry_node_id: string;
@@ -286,6 +289,91 @@ const LEAD_CAPTURE: FlowTemplate = {
 };
 
 // ============================================================
+// 4. Book appointment — collects date + time, then registers a
+//    PENDING booking in the connected external salon system (see
+//    src/lib/salon-booking/). Requires Settings → Salon booking to be
+//    configured first; the create_salon_appointment node fails safely
+//    to the handoff branch otherwise (never silently "books" nothing).
+// ============================================================
+const BOOK_APPOINTMENT: FlowTemplate = {
+  slug: "book_appointment",
+  name: "Book appointment",
+  description:
+    "Ask for a date and time, then register a pending appointment in the connected salon system. Requires Settings → Salon booking to be configured first.",
+  icon: "CalendarCheck",
+  trigger_type: "keyword",
+  trigger_config: {
+    keywords: ["cita", "reservar", "agendar", "appointment"],
+    match_type: "contains",
+  },
+  entry_node_id: "start",
+  nodes: [
+    {
+      node_key: "start",
+      node_type: "start",
+      config: { next_node_key: "greeting" },
+    },
+    {
+      node_key: "greeting",
+      node_type: "send_message",
+      config: {
+        text: "Hi! Let's book your appointment. 📅",
+        next_node_key: "ask_date",
+      } as SendMessageNodeConfig,
+    },
+    {
+      node_key: "ask_date",
+      node_type: "collect_input",
+      config: {
+        prompt_text: "What day would you like to come in? (format: DD/MM/YYYY)",
+        var_key: "desired_date",
+        next_node_key: "ask_time",
+      } as CollectInputNodeConfig,
+    },
+    {
+      node_key: "ask_time",
+      node_type: "collect_input",
+      config: {
+        prompt_text: "What time? (format: HH:MM, 24h)",
+        var_key: "desired_time",
+        next_node_key: "book",
+      } as CollectInputNodeConfig,
+    },
+    {
+      node_key: "book",
+      node_type: "create_salon_appointment",
+      config: {
+        date_var_key: "desired_date",
+        time_var_key: "desired_time",
+        duration_minutes: 30,
+        next_node_key: "confirmed",
+        error_next_node_key: "booking_failed",
+      } as CreateSalonAppointmentNodeConfig,
+    },
+    {
+      node_key: "confirmed",
+      node_type: "send_message",
+      config: {
+        text: "You're all set! We've noted your request for {{vars.desired_date}} at {{vars.desired_time}} — our team will confirm shortly.",
+        next_node_key: "end",
+      } as SendMessageNodeConfig,
+    },
+    {
+      node_key: "end",
+      node_type: "end",
+      config: {},
+    },
+    {
+      node_key: "booking_failed",
+      node_type: "handoff",
+      config: {
+        note: "Couldn't register the appointment automatically — requested {{vars.desired_date}} {{vars.desired_time}}. Book manually.",
+      } as HandoffNodeConfig,
+    },
+  ],
+};
+
+// ============================================================
 // Registry
 // ============================================================
 
@@ -293,6 +381,7 @@ const TEMPLATES: Record<string, FlowTemplate> = {
   welcome_menu: WELCOME_MENU,
   faq_bot: FAQ_BOT,
   lead_capture: LEAD_CAPTURE,
+  book_appointment: BOOK_APPOINTMENT,
 };
 
 export function getFlowTemplate(slug: string): FlowTemplate | null {

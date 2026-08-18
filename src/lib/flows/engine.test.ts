@@ -6,6 +6,7 @@ import {
   isSuspending,
   isTerminal,
   evaluateConditionPredicate,
+  parseSalonDateTime,
 } from "./engine";
 
 describe("matchReplyId", () => {
@@ -144,12 +145,13 @@ describe("matchesKeywordTrigger", () => {
 });
 
 describe("node classification helpers", () => {
-  it("isAutoAdvancing covers start + send_message + send_media + condition + set_tag", () => {
+  it("isAutoAdvancing covers start + send_message + send_media + condition + set_tag + create_salon_appointment", () => {
     expect(isAutoAdvancing("start")).toBe(true);
     expect(isAutoAdvancing("send_message")).toBe(true);
     expect(isAutoAdvancing("send_media")).toBe(true);
     expect(isAutoAdvancing("condition")).toBe(true);
     expect(isAutoAdvancing("set_tag")).toBe(true);
+    expect(isAutoAdvancing("create_salon_appointment")).toBe(true);
     expect(isAutoAdvancing("send_buttons")).toBe(false);
     expect(isAutoAdvancing("send_list")).toBe(false);
     expect(isAutoAdvancing("collect_input")).toBe(false);
@@ -188,6 +190,7 @@ describe("node classification helpers", () => {
       "condition",
       "set_tag",
       "handoff",
+      "create_salon_appointment",
       "end",
     ];
     for (const t of types) {
@@ -195,6 +198,35 @@ describe("node classification helpers", () => {
       // Exactly one of the three should be true for every known node.
       expect(flags.filter(Boolean).length).toBe(1);
     }
+  });
+});
+
+describe("parseSalonDateTime", () => {
+  it("parses a valid dd/MM/yyyy + HH:mm pair", () => {
+    const d = parseSalonDateTime("09/08/2026", "15:30");
+    expect(d).not.toBeNull();
+    expect(d?.getFullYear()).toBe(2026);
+    expect(d?.getMonth()).toBe(7); // August, 0-indexed
+    expect(d?.getDate()).toBe(9);
+    expect(d?.getHours()).toBe(15);
+    expect(d?.getMinutes()).toBe(30);
+  });
+
+  it("trims surrounding whitespace", () => {
+    const d = parseSalonDateTime("  09/08/2026  ", " 15:30 ");
+    expect(d).not.toBeNull();
+  });
+
+  it("returns null for an invalid date", () => {
+    expect(parseSalonDateTime("31/02/2026", "10:00")).toBeNull();
+    expect(parseSalonDateTime("not-a-date", "10:00")).toBeNull();
+    expect(parseSalonDateTime("", "10:00")).toBeNull();
+  });
+
+  it("returns null for an invalid time", () => {
+    expect(parseSalonDateTime("09/08/2026", "25:99")).toBeNull();
+    expect(parseSalonDateTime("09/08/2026", "not-a-time")).toBeNull();
+    expect(parseSalonDateTime("09/08/2026", "")).toBeNull();
   });
 });
 

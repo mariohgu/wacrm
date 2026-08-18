@@ -701,6 +701,7 @@ const ADD_NODE_TYPES: NodeType[] = [
   'condition',
   'set_tag',
   'handoff',
+  'create_salon_appointment',
   'end',
 ];
 

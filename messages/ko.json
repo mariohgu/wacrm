@@ -1139,7 +1139,16 @@
         "filenamePlaceholder": "invoice.pdf",
         "advanceAfterSending": "전송 후 다음 진행",
         "pickNextNode": "다음 노드를 선택하세요…",
-        "none": "— 없음 —"
+        "none": "— 없음 —",
+        "salonAppointmentHelp": "계정에 설정된 기본값(설정 → 살롱 예약)을 사용해 살롱 시스템에 대기 중인 예약을 등록합니다.",
+        "dateVarKeyLabel": "날짜가 저장된 변수",
+        "timeVarKeyLabel": "시간이 저장된 변수",
+        "salonAppointmentFormatHint": "위의 입력 수집 프롬프트가 정확히 DD/MM/YYYY와 HH:MM(24시간제) 형식을 요청하는지 확인하세요 — 자유 형식 날짜 해석은 지원되지 않습니다.",
+        "durationMinutesLabel": "소요 시간(분)",
+        "extraNotesVarKeysLabel": "메모에 포함할 추가 변수",
+        "extraNotesVarKeysHelp": "쉼표로 구분된 변수 키. 연락처의 이름/전화번호와 요청된 날짜/시간은 항상 자동으로 포함됩니다.",
+        "onBookedAdvance": "예약 완료 시 다음 진행",
+        "onErrorAdvance": "오류 발생 시 다음 진행"
       },
       "categories": {
         "messaging": "메시징",
@@ -1182,6 +1191,10 @@
         "handoff": {
           "label": "상담원에게 인계",
           "blurb": "대화를 사람에게 넘깁니다"
+        },
+        "create_salon_appointment": {
+          "label": "예약 등록",
+          "blurb": "살롱 시스템에 대기 중인 예약을 등록합니다"
         },
         "end": {
           "label": "종료",
@@ -1527,7 +1540,8 @@
       "fields": "필드 & 태그",
       "deals": "딜 & 통화",
       "members": "팀원",
-      "api": "API 키"
+      "api": "API 키",
+      "salon-booking": "살롱 예약"
     },
     "groups": {
       "account": "계정",
@@ -1648,6 +1662,43 @@
       "saving": "저장 중...",
       "saveFailed": "기본 통화를 저장하지 못했습니다",
       "saveSuccess": "기본 통화가 업데이트되었습니다"
+    },
+    "salonBooking": {
+      "title": "살롱 예약",
+      "description": "살롱 자체의 예약 API를 연결하면 WhatsApp 봇이 일반 고객/서비스 자리표시자를 사용해 대기 중인 예약을 자동으로 등록할 수 있습니다. 이후 담당자가 확인합니다.",
+      "adminOnlyConfig": "관리자와 소유자만 이 설정을 변경할 수 있습니다.",
+      "loading": "불러오는 중…",
+      "loadFailed": "살롱 예약 설정을 불러오지 못했습니다",
+      "connectionCard": "연결",
+      "encryptionNotice": "토큰은 저장 시 암호화되며(AES-256-GCM), 저장 후에는 다시 표시되지 않습니다.",
+      "baseUrl": "API 기본 URL",
+      "apiToken": "API 토큰",
+      "tokenPlaceholder": "Bearer 토큰",
+      "tokenHint": "살롱의 Laravel 백엔드에서 발급한 Sanctum Personal Access Token입니다. 자체 대시보드 로그인 정보가 아닙니다.",
+      "testConnection": "연결 테스트",
+      "testSuccess": "연결이 정상입니다.",
+      "testRejected": "살롱 API가 요청을 거부했습니다.",
+      "testNetworkError": "살롱 API에 연결할 수 없습니다.",
+      "defaultsCard": "기본 자리표시자 값",
+      "defaultsDesc": "WhatsApp에서 시작된 모든 예약은 이 id들을 사용하며 \"대기 중\"으로 표시됩니다 — 담당자가 살롱 시스템에서 확인하거나 재배정합니다.",
+      "defaultClienteId": "기본 고객 id",
+      "defaultEstadoId": "기본 상태 id (\"대기 중\")",
+      "defaultServicioId": "기본 서비스 id",
+      "defaultStaffId": "기본 담당자 id",
+      "defaultStaffIdPlaceholder": "미배정으로 두려면 비워두세요",
+      "defaultServicioPrecio": "기본 서비스 가격",
+      "defaultServicioDuracion": "기본 서비스 소요 시간(분)",
+      "enableBooking": "자동 예약 활성화",
+      "enableBookingDesc": "꺼져 있으면 예약 생성 Flow 단계가 살롱 API를 호출하는 대신 안전하게 실패합니다.",
+      "remove": "제거",
+      "save": "저장",
+      "saveSuccess": "살롱 예약 설정이 저장되었습니다",
+      "saveFailed": "살롱 예약 설정을 저장하지 못했습니다",
+      "removeSuccess": "살롱 예약 설정이 제거되었습니다",
+      "removeFailed": "살롱 예약 설정을 제거하지 못했습니다",
+      "missingBaseUrl": "API 기본 URL을 입력하세요",
+      "missingDefaults": "고객, 상태, 서비스 id는 필수입니다",
+      "missingToken": "API 토큰을 입력하세요"
     },
     "aiConfig": {
       "title": "에이전트 설정",
