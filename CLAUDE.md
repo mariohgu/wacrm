@@ -201,34 +201,45 @@ only ever POSTs a pending booking to it.
 ## WhatsApp contact identity (phone vs. BSUID)
 
 Meta's "WhatsApp usernames" rollout (live since 2026-03-31, mandatory by
-June 2026) lets a customer hide their phone number from a business. When
-they do, the webhook's `messages[].from` carries a **Business-Scoped
-User ID (BSUID)** instead of digits — format `CC.alphanumeric`, e.g.
-`BR.1A2B3C4D5E6F7G8H9I0J...` — or may omit `from` entirely in favor of a
-new top-level `user_id` field. This repo has not yet confirmed the exact
-payload shape Meta sends for an affected account (see the change log
-entry below) — treat any code here that assumes `from` is always a
-plain phone number as unverified against the real BSUID case.
+June 2026) lets a customer hide their phone number from a business.
+**Confirmed against a real payload from an affected account** (2026-08-22
+— prior guesses based on third-party blog posts were wrong on one key
+point, see the change log below): when a customer has hidden their
+number, `messages[].from` is **absent entirely** (not present-but-odd)
+and the identifier instead lives in `messages[].from_user_id` —
+mirrored on `contacts[].user_id` — format `CC.digits`, e.g.
+`PE.1128521366369305` ("PE" = the country code, matching the business
+number's own country in the observed case; the digit run after the dot
+may not always be all-digits, don't assume it). `contacts[].wa_id` is
+also absent for such a contact. `contacts[].profile` additionally
+carries an optional `username` (plain ASCII, the customer's real
+@handle, e.g. `"thali.vd_"`) alongside `name`, which for a
+username-having customer can be a **decorative Unicode string**
+(stylized mathematical-alphanumeric symbols) that renders as garbled
+boxes in the inbox — prefer `username` over `name` when present.
 
-`findOrCreateContact` (`src/app/api/whatsapp/webhook/route.ts`) detects
-a non-phone `from` by checking the **raw** string against
-`/^\+?\d{5,15}$/` — deliberately not by checking whether
-`normalizePhone(from)` came out empty, since a BSUID can contain enough
-stray digits to normalize into a plausible-looking (and possibly
-colliding) fake phone number. When it doesn't look like a phone, the
-raw id is used as an exact-match dedup/storage key instead of going
-through `findExistingContact`'s digit-suffix `phonesMatch` logic. This
-is a **stopgap** for the duplicate-contact symptom only — outbound
-sends to such a contact still fail (`sanitizePhoneForMeta`/
+`processMessage` (`src/app/api/whatsapp/webhook/route.ts`) resolves the
+sender id with `message.from ?? message.from_user_id ?? contact.user_id
+?? ''`, and the display name with `contact.profile.username ||
+contact.profile.name`. `findOrCreateContact` detects a non-phone id by
+checking the **raw** string against `/^\+?\d{5,15}$/` — deliberately not
+by checking whether `normalizePhone(id)` came out empty, since a BSUID
+can contain enough stray digits to normalize into a plausible-looking
+(and possibly colliding) fake phone number. When it doesn't look like a
+phone, the raw id is used as an exact-match dedup/storage key instead of
+going through `findExistingContact`'s digit-suffix `phonesMatch` logic.
+
+This is still a **stopgap** for the duplicate-contact symptom only —
+outbound sends to such a contact still fail (`sanitizePhoneForMeta`/
 `isValidE164` in `src/lib/flows/meta-send.ts` /
-`src/lib/automations/meta-send.ts` reject a non-phone stored value).
-The real fix needs a dedicated identity column (`contacts.phone` is
-`NOT NULL` and drives a generated `phone_normalized` column + a
-per-account unique index, migration 022 — a BSUID doesn't fit that
-model), an updated migration, and BSUID-aware outbound sending across
-every `meta-send.ts` call site plus broadcasts. Not done yet — needs a
-real webhook payload from an affected account to implement against
-ground truth rather than guessing field names.
+`src/lib/automations/meta-send.ts` reject a non-phone stored value like
+`"PE.1128521366369305"` — the error just changes from "contact not
+found" to "contact phone invalid" once dedup is fixed). The real fix
+needs a dedicated identity column (`contacts.phone` is `NOT NULL` and
+drives a generated `phone_normalized` column + a per-account unique
+index, migration 022 — a BSUID doesn't fit that model), an updated
+migration, and BSUID-aware outbound sending across every `meta-send.ts`
+call site plus broadcasts. Not done yet.
 
 # Change log (Claude Code sessions)
 
@@ -567,3 +578,73 @@ unrelated warning), full `npx vitest run` — only the same pre-existing
 > `src/lib/flows/meta-send.ts`, `src/lib/automations/meta-send.ts`, and
 > broadcast sending. Until then, replying to a hidden-number customer
 > from wacrm does not work.
+
+## 2026-08-22 — WhatsApp contact-duplication stopgap: corrected against a real payload
+
+The prior stopgap (previous entry, same day) shipped based on
+third-party documentation of Meta's BSUID format and never actually
+engaged in production — a temporary debug log
+(`console.log('[webhook DEBUG] raw inbound payload:', rawBody)`,
+gated on `rawBody.includes('"messages"')`, added to the `POST` handler)
+captured a real payload from the affected account, which showed the
+guess was wrong on the load-bearing detail: `messages[].from` isn't
+present-but-garbled for a hidden-number sender, it's **absent
+entirely**. The real identifier lives in `messages[].from_user_id`
+(mirrored on `contacts[].user_id`), which the prior fix never read —
+so `rawSenderId` was `undefined`, `!!rawSenderId` was `false`,
+`usingFallbackId` never activated, and the code fell straight back to
+the original bug path (empty `phone`, new contact every message).
+Confirmed still happening via a second real-log excerpt from the same
+account (still creating new "contact not found" auto-reply failures)
+before this fix.
+
+Also discovered in the same payload: `contacts[].profile` can carry an
+optional `username` (plain ASCII — the real @handle) alongside `name`,
+which for a username-having customer is a decorative Unicode string
+(stylized mathematical-alphanumeric glyphs) that renders as garbled
+boxes in the inbox — exactly what the user's original screenshot showed
+("□□□□□□□3"). Not previously known or handled.
+
+Touched:
+
+- [src/app/api/whatsapp/webhook/route.ts](src/app/api/whatsapp/webhook/route.ts)
+  — `WhatsAppMessage.from` → optional, added `from_user_id?: string`;
+  `WhatsAppWebhookEntry`'s `contacts[].wa_id` → optional, added
+  `user_id?: string` and `profile.username?: string`. `processMessage`
+  now resolves the sender id via `message.from ?? message.from_user_id
+  ?? contact.user_id ?? ''` and the display name via
+  `contact.profile.username || contact.profile.name`, instead of
+  reading `message.from`/`contact.profile.name` alone. Removed the
+  temporary debug log now that it's served its purpose.
+  `findOrCreateContact`'s own `looksLikePhone`/`usingFallbackId` logic
+  needed no change — it was correct in principle, it just never
+  received the right input.
+- [src/app/api/whatsapp/webhook/route.test.ts](src/app/api/whatsapp/webhook/route.test.ts)
+  — `inboundRequest`/`runWebhook` gained an optional `contacts` param
+  (default unchanged, so every pre-existing test is unaffected); the
+  BSUID test fixture corrected from a fabricated
+  `from: 'BR.1A2B3C4D5E6F7G8H9I0J'` shape to the confirmed real one
+  (`from_user_id`, no `from` key, `contacts[].user_id` +
+  `profile.username`); added a third test asserting `username` is
+  preferred over the decorative `name` for the stored contact.
+
+Verified: `npx tsc --noEmit`, `npx eslint` (0 errors, same
+pre-existing `downloadMedia` unused-import warning), `npx vitest run`
+on the file (18/18) and the full suite (only the same pre-existing,
+unrelated `date-utils.test.ts` failures). Not verified against a
+second live inbound message from the same customer post-deploy — the
+user should confirm the next message from `user_id
+"PE.1128521366369305"` (or any other hidden-number customer) lands on
+the same existing contact rather than creating a new one.
+
+**Still not fixed, same as the prior entry:** outbound sending to
+these contacts. `contacts.phone` now holds the non-empty raw id
+(`"PE.1128521366369305"`), so `meta-send.ts`'s `!contact?.phone` guard
+no longer trips — but `sanitizePhoneForMeta`/`isValidE164` immediately
+after it will reject that value as an invalid phone, so the error just
+changes shape (`"contact phone invalid: ..."` instead of `"contact not
+found"`). AI auto-reply, Flow sends, and automation sends to a
+hidden-number customer still don't deliver. The full fix (dedicated
+identity column, migration, BSUID-aware outbound sending across every
+`meta-send.ts` call site plus broadcasts) remains a separate,
+explicitly-deferred follow-up.

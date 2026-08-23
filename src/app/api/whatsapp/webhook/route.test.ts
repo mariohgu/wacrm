@@ -254,7 +254,12 @@ const TEXT_MESSAGE = {
   text: { body: 'hello' },
 }
 
-function inboundRequest(message: Record<string, unknown> = TEXT_MESSAGE) {
+const DEFAULT_CONTACTS = [{ wa_id: '15551230000', profile: { name: 'Ada' } }]
+
+function inboundRequest(
+  message: Record<string, unknown> = TEXT_MESSAGE,
+  contacts: Record<string, unknown>[] = DEFAULT_CONTACTS,
+) {
   const body = {
     entry: [
       {
@@ -263,7 +268,7 @@ function inboundRequest(message: Record<string, unknown> = TEXT_MESSAGE) {
             field: 'messages',
             value: {
               metadata: { phone_number_id: 'pn-1' },
-              contacts: [{ wa_id: '15551230000', profile: { name: 'Ada' } }],
+              contacts,
               messages: [message],
             },
           },
@@ -277,8 +282,11 @@ function inboundRequest(message: Record<string, unknown> = TEXT_MESSAGE) {
   } as unknown as Request
 }
 
-async function runWebhook(message?: Record<string, unknown>) {
-  const res = await POST(inboundRequest(message))
+async function runWebhook(
+  message?: Record<string, unknown>,
+  contacts?: Record<string, unknown>[],
+) {
+  const res = await POST(inboundRequest(message, contacts))
   // Drain the after() callback exactly as the runtime would.
   for (const cb of h.state.afterCallbacks) await cb()
   return res
@@ -567,33 +575,51 @@ describe('inbound webhook: inbound media is mirrored (#466)', () => {
 })
 
 describe('inbound webhook: WhatsApp usernames (BSUID) fallback identity', () => {
-  // Meta's "WhatsApp usernames" rollout: when a customer hides their
-  // phone number, `from` carries a non-numeric Business-Scoped User ID
-  // instead of digits (e.g. "BR.1A2B3C4D..."). normalizePhone() reduces
-  // that to '', so findOrCreateContact must fall back to an exact match
-  // on the raw id instead of creating a new contact on every message.
+  // Meta's "WhatsApp usernames" rollout: a hidden-number customer's
+  // inbound message OMITS `from` entirely (not present-but-garbled) —
+  // confirmed against a real payload from an affected account. The
+  // identifier instead lives in `from_user_id` (mirrored on the contact
+  // as `user_id`), format "CC.digits" (e.g. "PE.1128521366369305").
+  // normalizePhone(undefined) would reduce that to '', so
+  // findOrCreateContact must fall back to an exact match on the raw id
+  // instead of creating a new contact on every message.
   const BSUID_MESSAGE = {
     id: 'wamid.BSUID1',
-    from: 'BR.1A2B3C4D5E6F7G8H9I0J',
+    // No `from` key — real payloads omit it for a hidden-number sender.
+    from_user_id: 'PE.1128521366369305',
     timestamp: '1700000000',
     type: 'text',
     text: { body: 'hello from a hidden number' },
   }
+  const BSUID_CONTACTS = [
+    {
+      // A real decorative-Unicode display name, as seen in production —
+      // `username` should be preferred over this for the stored name.
+      profile: { name: '𐹚𝓕𝓉𝒂𝓍𝒊𝒂꒱', username: 'thali.vd_' },
+      user_id: 'PE.1128521366369305',
+    },
+  ]
 
   it('creates exactly one contact, keyed on the raw sender id', async () => {
-    await runWebhook(BSUID_MESSAGE)
+    await runWebhook(BSUID_MESSAGE, BSUID_CONTACTS)
 
     expect(h.state.contactsTable).toHaveLength(1)
-    expect(h.state.contactsTable[0].phone).toBe('BR.1A2B3C4D5E6F7G8H9I0J')
+    expect(h.state.contactsTable[0].phone).toBe('PE.1128521366369305')
   })
 
   it('reuses the same contact for a second message from the same non-phone id', async () => {
-    await runWebhook({ ...BSUID_MESSAGE, id: 'wamid.BSUID1' })
-    await runWebhook({ ...BSUID_MESSAGE, id: 'wamid.BSUID2' })
+    await runWebhook({ ...BSUID_MESSAGE, id: 'wamid.BSUID1' }, BSUID_CONTACTS)
+    await runWebhook({ ...BSUID_MESSAGE, id: 'wamid.BSUID2' }, BSUID_CONTACTS)
 
     // The old behavior created a brand-new contact per message here —
     // this is the regression the fallback-id lookup guards against.
     expect(h.state.contactsTable).toHaveLength(1)
+  })
+
+  it('prefers profile.username over the decorative profile.name for the stored contact name', async () => {
+    await runWebhook(BSUID_MESSAGE, BSUID_CONTACTS)
+
+    expect(h.state.contactsTable[0].name).toBe('thali.vd_')
   })
 })
 

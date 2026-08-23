@@ -37,7 +37,14 @@ function supabaseAdmin() {
 
 interface WhatsAppMessage {
   id: string
-  from: string
+  /** Absent when the sender has hidden their phone number ("WhatsApp
+   *  usernames") — see `from_user_id` below and CLAUDE.md's "WhatsApp
+   *  contact identity" section. */
+  from?: string
+  /** Present instead of `from` for a hidden-number sender. A
+   *  Business-Scoped User ID, format "CC.digits" (e.g.
+   *  "PE.1128521366369305") — opaque, not a phone number. */
+  from_user_id?: string
   timestamp: string
   type: string
   text?: { body: string }
@@ -82,8 +89,18 @@ interface WhatsAppWebhookEntry {
         phone_number_id: string
       }
       contacts?: Array<{
-        profile: { name: string }
-        wa_id: string
+        profile: {
+          name: string
+          /** Plain-ASCII @handle, present when the customer has set a
+           *  WhatsApp username. Prefer this over `name`, which can be a
+           *  decorative Unicode string for such customers. */
+          username?: string
+        }
+        /** Absent for a hidden-number contact — see `user_id`. */
+        wa_id?: string
+        /** Mirrors the message's `from_user_id` for a hidden-number
+         *  contact — same BSUID, format "CC.digits". */
+        user_id?: string
       }>
       messages?: WhatsAppMessage[]
       statuses?: Array<{
@@ -199,14 +216,6 @@ export async function POST(request: Request) {
     body = JSON.parse(rawBody)
   } catch {
     return NextResponse.json({ error: 'Invalid JSON' }, { status: 400 })
-  }
-
-  // TEMPORARY DEBUG — 2026-08-22, remove once a BSUID/username payload
-  // has been captured (see the "WhatsApp contact identity" section in
-  // CLAUDE.md). Only logs delivery types that carry an inbound message
-  // (skips pure status-update pings) to keep the noise down.
-  if (rawBody.includes('"messages"')) {
-    console.log('[webhook DEBUG] raw inbound payload:', rawBody)
   }
 
   // Process AFTER the response so we ack Meta within their ~20s timeout
@@ -582,7 +591,11 @@ async function handleReaction(
 
 async function processMessage(
   message: WhatsAppMessage,
-  contact: { profile: { name: string }; wa_id: string },
+  contact: {
+    profile: { name: string; username?: string }
+    wa_id?: string
+    user_id?: string
+  },
   // Tenancy. Resolved from the matched whatsapp_config row; every
   // contact / conversation / message row created downstream is
   // stamped with this so any member of the account can see it.
@@ -596,8 +609,19 @@ async function processMessage(
   // See parseMessageContent for what it turns off.
   mirrorMedia: boolean
 ) {
-  const senderPhone = normalizePhone(message.from)
-  const contactName = contact.profile.name
+  // Precedence: a normal delivery carries `message.from` (digits). A
+  // hidden-number delivery ("WhatsApp usernames") omits it and carries
+  // the BSUID in `message.from_user_id` instead, mirrored on the
+  // contact object as `contact.user_id` — confirmed against a real
+  // payload from an affected account. See CLAUDE.md's "WhatsApp contact
+  // identity" section.
+  const rawSenderId = message.from ?? message.from_user_id ?? contact.user_id ?? ''
+  const senderPhone = normalizePhone(rawSenderId)
+  // `profile.username` is the plain-ASCII @handle; `profile.name` can be
+  // a decorative Unicode string (stylized alphanumeric symbols) for a
+  // username-having customer, which renders as garbled boxes in the
+  // inbox — prefer username when Meta supplies one.
+  const contactName = contact.profile.username || contact.profile.name
 
   // Find or create contact
   const contactOutcome = await findOrCreateContact(
@@ -605,7 +629,7 @@ async function processMessage(
     configOwnerUserId,
     senderPhone,
     contactName,
-    message.from
+    rawSenderId
   )
   if (!contactOutcome) return
   const contactRecord = contactOutcome.contact
@@ -1126,23 +1150,28 @@ async function findOrCreateContact(
   configOwnerUserId: string,
   phone: string,
   name: string,
-  // Untouched `message.from` — kept alongside the normalized `phone` as
-  // a fallback identity key. See the `usingFallbackId` branch below.
+  // The resolved sender id (message.from, or the from_user_id/user_id
+  // fallback for a hidden-number sender) — kept alongside the
+  // normalized `phone` as a fallback identity key. See the
+  // `usingFallbackId` branch below.
   rawSenderId: string,
 ): Promise<ContactOutcome | null> {
   const db = supabaseAdmin()
 
   // Meta's "WhatsApp usernames" rollout (BSUID, live since 2026-03-31):
-  // when a customer hides their phone number, `message.from` is a
-  // non-numeric Business-Scoped User ID (e.g. "BR.1A2B3C4D...") instead
-  // of digits. Detecting this from `normalizePhone(from) === ''` is NOT
-  // reliable — a BSUID can happen to contain enough stray digits to
-  // normalize into a plausible-looking (but meaningless, and possibly
-  // colliding) phone-shaped string. Instead, check the RAW id itself:
-  // a real Meta phone-number `from` is always digits-only (optionally
-  // with a leading '+'). Anything else — letters, dots, etc. — is
-  // treated as an opaque non-phone identifier, regardless of which
-  // digits happen to be embedded in it.
+  // when a customer hides their phone number, `message.from` is
+  // ABSENT entirely (not present-but-garbled) and the identifier
+  // instead lives in `message.from_user_id` / `contact.user_id` — a
+  // Business-Scoped User ID, format "CC.digits" (e.g.
+  // "PE.1128521366369305"), confirmed against a real payload from an
+  // affected account. Detecting this from `normalizePhone(from) === ''`
+  // is NOT reliable — a BSUID can happen to contain enough stray digits
+  // to normalize into a plausible-looking (but meaningless, and
+  // possibly colliding) phone-shaped string. Instead, check the RAW id
+  // itself: a real Meta phone-number identifier is always digits-only
+  // (optionally with a leading '+'). Anything else — letters, dots,
+  // etc. — is treated as an opaque non-phone identifier, regardless of
+  // which digits happen to be embedded in it.
   //
   // Without this, the digit-suffix dedup in `findExistingContact` bails
   // immediately on an empty/garbled normalized phone (and the DB's
