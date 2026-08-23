@@ -731,6 +731,44 @@ describe('inbound webhook: username-based identity (survives a rotated BSUID tok
     expect(h.state.contactsTable[0].wa_user_id).toBe('PE.1128521366369305')
     // The real phone stays untouched — it's still the trusted one.
     expect(h.state.contactsTable[0].phone).toBe('+51912147223')
+    // Regression guard: the staff-entered name must survive, not get
+    // silently replaced by the WhatsApp username on this (or any
+    // later) message.
+    expect(h.state.contactsTable[0].name).toBe('Thali Vasquez')
+  })
+
+  it('does not overwrite an existing name when a hidden-number message resolves via phone/BSUID fallback', async () => {
+    // Same bug, other branch: a contact matched by raw phone/BSUID
+    // (not by username) must also keep its existing name.
+    h.state.contactsTable.push({
+      id: 'contact-mario',
+      phone: 'PE.2833985306982266',
+      name: 'Mario',
+      wa_username: null,
+      wa_user_id: null,
+    })
+
+    await runWebhook(
+      {
+        id: 'wamid.MARIO1',
+        from_user_id: 'PE.2833985306982266',
+        timestamp: '1700000000',
+        type: 'text',
+        text: { body: 'hola de nuevo' },
+      },
+      [
+        {
+          profile: { name: 'Mario', username: 'mariof737' },
+          user_id: 'PE.2833985306982266',
+        },
+      ],
+    )
+
+    expect(h.state.contactsTable).toHaveLength(1)
+    expect(h.state.contactsTable[0].name).toBe('Mario')
+    // The username still gets captured opportunistically — only the
+    // display name is protected.
+    expect(h.state.contactsTable[0].wa_username).toBe('mariof737')
   })
 
   it('opportunistically captures a username seen alongside a real phone number', async () => {

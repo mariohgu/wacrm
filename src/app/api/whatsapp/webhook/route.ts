@@ -1255,7 +1255,13 @@ async function findOrCreateContact(
       .maybeSingle()
     if (byUsername) {
       const update: Record<string, unknown> = {}
-      if (name && name !== byUsername.name) update.name = name
+      // Only fill in a name the contact doesn't have yet — never
+      // overwrite one that's already set. `name` here prefers the
+      // WhatsApp username over profile.name (see the comment above),
+      // so without this guard a contact staff had manually corrected
+      // (e.g. "Mario") would get silently renamed back to the raw
+      // @handle ("mariof737") on every subsequent message.
+      if (name && !byUsername.name) update.name = name
       if (waUserId && waUserId !== byUsername.wa_user_id) {
         update.wa_user_id = waUserId
       }
@@ -1313,7 +1319,9 @@ async function findOrCreateContact(
 
   if (existingContact) {
     const update: Record<string, unknown> = {}
-    if (name && name !== existingContact.name) update.name = name
+    // Same guard as the username-match branch above — never overwrite
+    // a name the contact already has.
+    if (name && !existingContact.name) update.name = name
     // Opportunistic capture: Meta included a username on this delivery
     // that the existing row doesn't have recorded yet — save it now,
     // for free, so a future hidden-number message from the same person

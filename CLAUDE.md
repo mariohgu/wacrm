@@ -334,6 +334,21 @@ can contain enough stray digits to normalize into a plausible-looking
 phone, the raw id is used as an exact-match dedup/storage key instead of
 going through `findExistingContact`'s digit-suffix `phonesMatch` logic.
 
+That username-preferring `name` is only ever written to an **existing**
+contact's `name` column when the column is currently empty
+(`if (name && !existingContact.name)`, both in the username-match
+branch and the phone/BSUID-fallback branch) — never as an
+unconditional overwrite. A contact's name is set once, either at
+creation or the first time staff/automation fills it in; every later
+inbound message only refreshes `wa_user_id`/`wa_username`/`phone`
+(routing/identity data), never `name` again. This matters because
+`name` naturally prefers the WhatsApp @handle over `profile.name` (see
+above) — without the "only if empty" guard, a customer's real name
+entered by staff (e.g. "Mario") would get silently renamed back to
+their raw username (e.g. "mariof737") on every subsequent message, since
+the two will almost always differ (bug reported and fixed 2026-08-23,
+see change log).
+
 **Update, 2026-08-22 (same day, later): the BSUID token itself is not a
 stable identity.** Deduping purely on `wa_user_id`/`from_user_id` (the
 paragraphs above) breaks once Meta rotates that token for a returning
@@ -1249,3 +1264,73 @@ entered an embeddings key.
 > `supabase/migrations/040_transcription_key.sql` before voice notes
 > will transcribe (only needed if you want transcription at all — the
 > feature is fully opt-in and inert without it).
+
+## 2026-08-23 — Stop overwriting a contact's name on every subsequent message
+
+User reported (with a screenshot) that a contact they'd manually named
+"Mario" showed up renamed to "mariof737" — the customer's raw WhatsApp
+@handle — after writing in again. The two things the user actually
+asked to have checked (the AI consulting the CRM before asking for
+name/phone again, and resolving a hidden-number message by username
+when the BSUID token rotates) were **already shipped** in earlier
+sessions (`buildCustomerContext`, `src/lib/ai/context.ts`; the
+username-first branch in `findOrCreateContact`). The screenshot
+exposed a separate, real bug in that same function.
+
+Root cause: both of `findOrCreateContact`'s existing-contact branches
+(username-match and phone/BSUID-fallback) unconditionally overwrote
+`contacts.name` whenever the freshly-computed `name` (which prefers
+`contact.profile.username` over `profile.name` — see the "WhatsApp
+contact identity" section above) differed from what was already
+stored:
+
+```ts
+if (name && name !== byUsername.name) update.name = name
+// ...
+if (name && name !== existingContact.name) update.name = name
+```
+
+Since a manually-set real name almost never matches the customer's raw
+@handle, this fired on essentially every inbound message from a
+username-having customer, silently discarding whatever staff had typed
+in.
+
+Touched:
+
+- [src/app/api/whatsapp/webhook/route.ts](src/app/api/whatsapp/webhook/route.ts)
+  — both conditions narrowed to `name && !byUsername.name` /
+  `name && !existingContact.name`: a name is now only ever filled in
+  when the contact doesn't have one yet, never overwritten once set.
+  `wa_username`/`wa_user_id` capture and the real-phone-showed-up
+  `phone` update are untouched — only the display name is protected.
+  New-contact creation (`insert`) is unaffected — `name || lookupKey`
+  is still the right initial value there, since there's nothing to
+  protect yet.
+- [src/app/api/whatsapp/webhook/route.test.ts](src/app/api/whatsapp/webhook/route.test.ts)
+  — added a `.name` assertion to the existing
+  `'matches a hidden-number message to a contact staff already linked
+  by username'` test (it reproduced this exact scenario without
+  checking the field that broke) as a permanent regression guard, and
+  a new test covering the same guard on the phone/BSUID-fallback
+  branch (a "Mario"-named contact keeps its name after a message
+  carrying `username: 'mariof737'`, while `wa_username` still gets
+  captured).
+
+No DB migration needed. Verified: `npx tsc --noEmit` clean; `npx
+eslint` on the touched files (0 errors); `npx vitest run
+src/app/api/whatsapp/webhook/route.test.ts` (24/24); full `npx vitest
+run` (898/900 — only the same pre-existing, unrelated
+`date-utils.test.ts` `mondayIndex` timezone flakiness). Not verified
+against a live inbound message this session — manual recommended: with
+"Mario"'s contact record intact, have that same customer (or any
+contact with a manually-set name and a linked/known WhatsApp username)
+message in again and confirm the name in Contacts/Inbox stays
+unchanged.
+
+**Not investigated this session, flagged by the user in passing:** a
+server error log (`Error in WhatsApp media GET: ... Object with ID
+'...' does not exist...`) pasted alongside the name-overwrite report.
+Deferred at the user's own request — unclear whether it's new
+(possibly related to transcription's extra `getMediaUrl` call per
+voice note) or a pre-existing occasional failure; needs its own
+investigation.
