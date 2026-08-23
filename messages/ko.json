@@ -341,7 +341,9 @@
       "toastFailedDelete": "연락처를 삭제하지 못했습니다",
       "toastDeleted": "연락처가 삭제되었습니다",
       "toastBulkFailedDelete": "연락처를 삭제하지 못했습니다",
-      "toastBulkDeleted": "연락처 {count}개가 삭제되었습니다"
+      "toastBulkDeleted": "연락처 {count}개가 삭제되었습니다",
+      "waUsernameNoPhoneTooltip": "이 고객은 전화번호를 숨겼습니다(WhatsApp 사용자 이름). 대신 @사용자 이름을 표시합니다.",
+      "waUsernameUnknown": "번호 비공개"
     },
     "form": {
       "addTitle": "연락처 추가",
@@ -374,7 +376,10 @@
       "dupSimilar": "매우 유사한 번호를 가진 연락처가 이미 있습니다.",
       "loadingTags": "태그를 불러오는 중...",
       "noTagsAvailable": "사용 가능한 태그가 없습니다. 설정에서 태그를 만드세요.",
-      "phoneRequired": "전화번호는 필수입니다"
+      "phoneRequired": "전화번호는 필수입니다",
+      "waUsernameLabel": "WhatsApp 사용자 이름",
+      "waUsernamePlaceholder": "thali.vd_",
+      "waUsernameHint": "이 연락처의 WhatsApp @사용자 이름을 연결하면, 이후 번호가 숨겨진 메시지도 이 연락처로 연결됩니다."
     },
     "detailView": {
       "tabs": {
@@ -395,12 +400,26 @@
       },
       "contactInfo": "연락처 정보",
       "unnamed": "알 수 없음",
+      "cancel": "취소",
       "contactDetailsDesc": "연락처 정보",
       "name": "이름",
       "phone": "전화번호",
       "email": "이메일",
       "company": "회사",
       "createdAt": "생성일",
+      "waUsername": "WhatsApp 사용자 이름",
+      "waUsernamePlaceholder": "thali.vd_",
+      "waUsernameHint": "이 연락처의 WhatsApp @사용자 이름을 연결하면, 이후 번호가 숨겨진 메시지도 이 연락처로 연결됩니다.",
+      "waUsernameNoPhoneTooltip": "이 고객은 전화번호를 숨겼습니다(WhatsApp 사용자 이름). 대신 @사용자 이름을 표시합니다.",
+      "waUsernameUnknown": "번호 비공개",
+      "mergeBtn": "다른 연락처와 병합",
+      "mergeDialogTitle": "연락처 병합",
+      "mergeDialogDesc": "{name}과(와) 병합할 중복 연락처를 검색하세요. 대화, 메모, 거래, 태그가 이곳으로 이동되며 해당 연락처는 삭제됩니다.",
+      "mergeSearchPlaceholder": "이름 또는 전화번호로 검색...",
+      "mergeConfirmWarning": "병합하면 {name}이(가) 영구적으로 삭제됩니다. 이 작업은 되돌릴 수 없습니다.",
+      "mergeConfirmBtn": "병합",
+      "toastMerged": "연락처가 병합되었습니다",
+      "toastMergeFailed": "연락처 병합에 실패했습니다",
       "customFields": "커스텀 필드",
       "noCustomFields": "정의된 커스텀 필드가 없습니다. 설정에서 만드세요.",
       "manageFields": "필드 관리",

@@ -341,7 +341,9 @@
       "toastFailedDelete": "Failed to delete contact",
       "toastDeleted": "Contact deleted",
       "toastBulkFailedDelete": "Failed to delete contacts",
-      "toastBulkDeleted": "{count} contacts deleted"
+      "toastBulkDeleted": "{count} contacts deleted",
+      "waUsernameNoPhoneTooltip": "This customer hid their phone number (WhatsApp usernames). Showing their @handle instead.",
+      "waUsernameUnknown": "Hidden number"
     },
     "form": {
       "addTitle": "Add Contact",
@@ -374,7 +376,10 @@
       "dupSimilar": "A contact with a very similar number already exists.",
       "loadingTags": "Loading tags...",
       "noTagsAvailable": "No tags available. Create tags in Settings.",
-      "phoneRequired": "Phone number is required"
+      "phoneRequired": "Phone number is required",
+      "waUsernameLabel": "WhatsApp username",
+      "waUsernamePlaceholder": "thali.vd_",
+      "waUsernameHint": "Link this contact's WhatsApp @handle so future messages from a hidden number still reach this contact."
     },
     "detailView": {
       "tabs": {
@@ -395,12 +400,26 @@
       },
       "contactInfo": "Contact Information",
       "unnamed": "Unknown",
+      "cancel": "Cancel",
       "contactDetailsDesc": "Contact details",
       "name": "Name",
       "phone": "Phone",
       "email": "Email",
       "company": "Company",
       "createdAt": "Created At",
+      "waUsername": "WhatsApp username",
+      "waUsernamePlaceholder": "thali.vd_",
+      "waUsernameHint": "Link this contact's WhatsApp @handle so future messages from a hidden number still reach this contact.",
+      "waUsernameNoPhoneTooltip": "This customer hid their phone number (WhatsApp usernames). Showing their @handle instead.",
+      "waUsernameUnknown": "Hidden number",
+      "mergeBtn": "Merge with another contact",
+      "mergeDialogTitle": "Merge contacts",
+      "mergeDialogDesc": "Search for a duplicate contact to merge into {name}. Its conversations, notes, deals and tags will move here, and it will be deleted.",
+      "mergeSearchPlaceholder": "Search by name or phone...",
+      "mergeConfirmWarning": "{name} will be permanently deleted after merging. This cannot be undone.",
+      "mergeConfirmBtn": "Merge",
+      "toastMerged": "Contacts merged",
+      "toastMergeFailed": "Failed to merge contacts",
       "customFields": "Custom Fields",
       "noCustomFields": "No custom fields defined. Create them in Settings.",
       "manageFields": "Manage fields",

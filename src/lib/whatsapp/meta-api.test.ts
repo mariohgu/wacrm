@@ -17,7 +17,7 @@ const neverFetch = () =>
 const BASE_ARGS = {
   phoneNumberId: "test-phone",
   accessToken: "test-token",
-  to: "1234567890",
+  recipientTarget: { type: "phone", value: "1234567890" },
   bodyText: "Body text",
 } as const;
 
@@ -138,6 +138,31 @@ describe("sendInteractiveButtons — validation", () => {
         },
       },
     });
+  });
+
+  it("sends `recipient` (not `to`) for a BSUID target", async () => {
+    let captured: { body: unknown } | null = null;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_url: string, init: RequestInit) => {
+        captured = { body: JSON.parse(String(init.body)) };
+        return new Response(
+          JSON.stringify({ messages: [{ id: "wamid.BSUID" }] }),
+          { status: 200 },
+        );
+      }),
+    );
+
+    await sendInteractiveButtons({
+      ...BASE_ARGS,
+      recipientTarget: { type: "user_id", value: "PE.1128521366369305" },
+      buttons: [{ id: "a", title: "A" }],
+    });
+
+    expect(captured).not.toBeNull();
+    const body = captured!.body as Record<string, unknown>;
+    expect(body.recipient).toBe("PE.1128521366369305");
+    expect(body).not.toHaveProperty("to");
   });
 });
 
@@ -265,5 +290,31 @@ describe("sendInteractiveList — validation", () => {
         },
       },
     });
+  });
+
+  it("sends `recipient` (not `to`) for a BSUID target", async () => {
+    let captured: { body: unknown } | null = null;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_url: string, init: RequestInit) => {
+        captured = { body: JSON.parse(String(init.body)) };
+        return new Response(
+          JSON.stringify({ messages: [{ id: "wamid.BSUID" }] }),
+          { status: 200 },
+        );
+      }),
+    );
+
+    await sendInteractiveList({
+      ...BASE_ARGS,
+      recipientTarget: { type: "user_id", value: "PE.1128521366369305" },
+      buttonLabel: "Open",
+      sections: [{ rows: [{ id: "r1", title: "Row 1" }] }],
+    });
+
+    expect(captured).not.toBeNull();
+    const body = captured!.body as Record<string, unknown>;
+    expect(body.recipient).toBe("PE.1128521366369305");
+    expect(body).not.toHaveProperty("to");
   });
 });

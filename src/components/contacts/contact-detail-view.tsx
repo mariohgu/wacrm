@@ -18,6 +18,14 @@ import {
   SheetTitle,
   SheetDescription,
 } from '@/components/ui/sheet';
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogDescription,
+  DialogFooter,
+} from '@/components/ui/dialog';
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -39,8 +47,184 @@ import {
   X,
   DollarSign,
   LayoutTemplate,
+  MessageCircle,
+  Merge,
+  Search,
 } from 'lucide-react';
 import { useTranslations } from 'next-intl';
+import { looksLikePhoneNumber } from '@/lib/whatsapp/phone-utils';
+
+/**
+ * Search-and-confirm dialog for collapsing a duplicate contact into
+ * the one currently open (e.g. a BSUID-only contact created before
+ * staff linked its WhatsApp username onto the real one — see
+ * CLAUDE.md's "WhatsApp contact identity" section). The contact being
+ * viewed is always the survivor; the one picked here is the loser
+ * (its data is re-pointed onto the survivor, then the row is deleted —
+ * see migration 040's `merge_contacts`).
+ */
+function MergeContactDialog({
+  open,
+  onOpenChange,
+  survivorId,
+  survivorLabel,
+  onMerged,
+}: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  survivorId: string;
+  survivorLabel: string;
+  onMerged: () => void;
+}) {
+  const t = useTranslations('Contacts.detailView');
+  const supabase = createClient();
+  const [query, setQuery] = useState('');
+  const [results, setResults] = useState<Contact[]>([]);
+  const [searching, setSearching] = useState(false);
+  const [target, setTarget] = useState<Contact | null>(null);
+  const [merging, setMerging] = useState(false);
+
+  useEffect(() => {
+    if (!open) {
+      setQuery('');
+      setResults([]);
+      setTarget(null);
+    }
+  }, [open]);
+
+  async function search() {
+    const value = query.trim();
+    if (!value) {
+      setResults([]);
+      return;
+    }
+    setSearching(true);
+    const { data } = await supabase
+      .from('contacts')
+      .select('*')
+      .neq('id', survivorId)
+      .or(`name.ilike.%${value}%,phone.ilike.%${value}%`)
+      .limit(8);
+    setResults(data ?? []);
+    setSearching(false);
+  }
+
+  async function confirmMerge() {
+    if (!target) return;
+    setMerging(true);
+    try {
+      const res = await fetch(`/api/contacts/${survivorId}/merge`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ loser_id: target.id }),
+      });
+      const payload = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        toast.error(payload?.error ?? t('toastMergeFailed'));
+        return;
+      }
+      toast.success(t('toastMerged'));
+      onOpenChange(false);
+      onMerged();
+    } catch {
+      toast.error(t('toastMergeFailed'));
+    } finally {
+      setMerging(false);
+    }
+  }
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="bg-popover border-border text-popover-foreground sm:max-w-md">
+        <DialogHeader>
+          <DialogTitle className="text-popover-foreground">
+            {t('mergeDialogTitle')}
+          </DialogTitle>
+          <DialogDescription className="text-muted-foreground">
+            {t('mergeDialogDesc', { name: survivorLabel })}
+          </DialogDescription>
+        </DialogHeader>
+
+        <div className="space-y-3">
+          <div className="flex gap-2">
+            <div className="relative flex-1">
+              <Search className="absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
+              <Input
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+                onKeyDown={(e) => e.key === 'Enter' && search()}
+                placeholder={t('mergeSearchPlaceholder')}
+                className="bg-muted border-border text-foreground pl-8"
+              />
+            </div>
+            <Button
+              type="button"
+              variant="outline"
+              onClick={search}
+              disabled={searching}
+              className="border-border text-muted-foreground hover:bg-muted"
+            >
+              {searching ? (
+                <Loader2 className="size-3.5 animate-spin" />
+              ) : (
+                <Search className="size-3.5" />
+              )}
+            </Button>
+          </div>
+
+          {results.length > 0 && (
+            <div className="max-h-48 divide-y divide-border overflow-y-auto rounded-md border border-border">
+              {results.map((c) => (
+                <button
+                  key={c.id}
+                  type="button"
+                  onClick={() => setTarget(c)}
+                  className={`w-full px-3 py-2 text-left text-sm transition-colors hover:bg-muted ${
+                    target?.id === c.id ? 'bg-muted' : ''
+                  }`}
+                >
+                  <div className="text-foreground">{c.name || t('unnamed')}</div>
+                  <div className="text-xs text-muted-foreground">
+                    {c.wa_username ? `@${c.wa_username} · ` : ''}
+                    {c.phone}
+                  </div>
+                </button>
+              ))}
+            </div>
+          )}
+
+          {target && (
+            <div className="rounded-md border border-amber-500/40 bg-amber-500/10 px-2.5 py-2 text-xs text-amber-300">
+              {t('mergeConfirmWarning', {
+                name: target.name || target.phone,
+              })}
+            </div>
+          )}
+        </div>
+
+        <DialogFooter className="bg-popover border-border">
+          <Button
+            type="button"
+            variant="outline"
+            onClick={() => onOpenChange(false)}
+            className="border-border text-muted-foreground hover:bg-muted"
+          >
+            {t('cancel')}
+          </Button>
+          <Button
+            type="button"
+            onClick={confirmMerge}
+            disabled={!target || merging}
+            className="bg-primary hover:bg-primary/90 text-primary-foreground"
+          >
+            {merging && <Loader2 className="size-4 animate-spin" />}
+            {t('mergeConfirmBtn')}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
 
 interface ContactDetailViewProps {
   open: boolean;
@@ -74,7 +258,13 @@ export function ContactDetailView({
   const [editPhone, setEditPhone] = useState('');
   const [editEmail, setEditEmail] = useState('');
   const [editCompany, setEditCompany] = useState('');
+  const [editWaUsername, setEditWaUsername] = useState('');
   const [savingDetails, setSavingDetails] = useState(false);
+
+  // Merge duplicate contact (e.g. a BSUID-only contact created before
+  // staff linked a WhatsApp username onto this one — see CLAUDE.md's
+  // "WhatsApp contact identity" section).
+  const [mergeOpen, setMergeOpen] = useState(false);
 
   // Tags tab
   const [allTags, setAllTags] = useState<Tag[]>([]);
@@ -113,6 +303,7 @@ export function ContactDetailView({
       setEditPhone(data.phone);
       setEditEmail(data.email ?? '');
       setEditCompany(data.company ?? '');
+      setEditWaUsername(data.wa_username ?? '');
     }
     setLoading(false);
   }, [contactId, supabase]);
@@ -211,6 +402,7 @@ export function ContactDetailView({
         phone: editPhone.trim(),
         email: editEmail.trim() || null,
         company: editCompany.trim() || null,
+        wa_username: editWaUsername.trim() || null,
         updated_at: new Date().toISOString(),
       })
       .eq('id', contactId);
@@ -405,18 +597,35 @@ export function ContactDetailView({
                     {t('contactDetailsDesc')}
                   </SheetDescription>
                   <div className="flex flex-wrap items-center gap-3 mt-1.5 text-xs text-muted-foreground">
-                    <button
-                      onClick={copyPhone}
-                      className="flex items-center gap-1 hover:text-primary transition-colors cursor-pointer"
-                    >
-                      <Phone className="size-3" />
-                      {contact.phone}
-                      {copiedPhone ? (
-                        <Check className="size-3 text-primary" />
-                      ) : (
-                        <Copy className="size-3" />
-                      )}
-                    </button>
+                    {looksLikePhoneNumber(contact.phone) ? (
+                      <button
+                        onClick={copyPhone}
+                        className="flex items-center gap-1 hover:text-primary transition-colors cursor-pointer"
+                      >
+                        <Phone className="size-3" />
+                        {contact.phone}
+                        {copiedPhone ? (
+                          <Check className="size-3 text-primary" />
+                        ) : (
+                          <Copy className="size-3" />
+                        )}
+                      </button>
+                    ) : (
+                      // Not a real phone number — a WhatsApp-usernames
+                      // customer whose hidden number is stored as a BSUID
+                      // placeholder. Show the readable @handle instead of
+                      // the opaque token (see CLAUDE.md's "WhatsApp
+                      // contact identity" section).
+                      <span
+                        className="flex items-center gap-1"
+                        title={t('waUsernameNoPhoneTooltip')}
+                      >
+                        <MessageCircle className="size-3" />
+                        {contact.wa_username
+                          ? `@${contact.wa_username}`
+                          : t('waUsernameUnknown')}
+                      </span>
+                    )}
                     {contact.email && (
                       <span className="flex items-center gap-1">
                         <Mail className="size-3" />
@@ -521,6 +730,20 @@ export function ContactDetailView({
                       className="bg-muted border-border text-foreground h-8 text-sm"
                     />
                   </div>
+                  <div className="space-y-1.5">
+                    <Label className="text-muted-foreground text-xs">
+                      {t('waUsername')}
+                    </Label>
+                    <Input
+                      value={editWaUsername}
+                      onChange={(e) => setEditWaUsername(e.target.value)}
+                      placeholder={t('waUsernamePlaceholder')}
+                      className="bg-muted border-border text-foreground h-8 text-sm placeholder:text-muted-foreground"
+                    />
+                    <p className="text-[11px] text-muted-foreground">
+                      {t('waUsernameHint')}
+                    </p>
+                  </div>
                   <Button
                     onClick={saveDetails}
                     disabled={savingDetails}
@@ -533,6 +756,15 @@ export function ContactDetailView({
                       <Save className="size-3.5" />
                     )}
                     {t('saveChangesBtn')}
+                  </Button>
+                  <Button
+                    onClick={() => setMergeOpen(true)}
+                    variant="outline"
+                    className="border-border text-muted-foreground hover:bg-muted w-full"
+                    size="sm"
+                  >
+                    <Merge className="size-3.5" />
+                    {t('mergeBtn')}
                   </Button>
                 </div>
               </TabsContent>
@@ -754,6 +986,22 @@ export function ContactDetailView({
       onOpenChange={setTemplatePickerOpen}
       onSelect={handleSendTemplate}
     />
+    {contactId && (
+      <MergeContactDialog
+        open={mergeOpen}
+        onOpenChange={setMergeOpen}
+        survivorId={contactId}
+        survivorLabel={contact?.name || contact?.phone || ''}
+        onMerged={() => {
+          fetchContact();
+          fetchTags();
+          fetchNotes();
+          fetchCustomFields();
+          fetchDeals();
+          onUpdated();
+        }}
+      />
+    )}
     </>
   );
 }

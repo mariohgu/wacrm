@@ -269,7 +269,7 @@ export async function deliverBroadcast(
         const result = await sendTemplateMessage({
           phoneNumberId: plan.phoneNumberId,
           accessToken: plan.accessToken,
-          to: variant,
+          recipientTarget: { type: 'phone', value: variant },
           templateName: plan.templateName,
           language: plan.templateLanguage,
           template: plan.templateRow ?? undefined,

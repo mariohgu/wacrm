@@ -341,7 +341,9 @@
       "toastFailedDelete": "Error al eliminar el contacto",
       "toastDeleted": "Contacto eliminado",
       "toastBulkFailedDelete": "Error al eliminar los contactos",
-      "toastBulkDeleted": "{count} contactos eliminados"
+      "toastBulkDeleted": "{count} contactos eliminados",
+      "waUsernameNoPhoneTooltip": "Esta clienta ocultó su número de teléfono (nombres de usuario de WhatsApp). Se muestra su @usuario en su lugar.",
+      "waUsernameUnknown": "Número oculto"
     },
     "form": {
       "addTitle": "Añadir contacto",
@@ -374,7 +376,10 @@
       "dupSimilar": "Ya existe un contacto con un número muy similar.",
       "loadingTags": "Cargando etiquetas...",
       "noTagsAvailable": "No hay etiquetas disponibles. Crea etiquetas en Configuración.",
-      "phoneRequired": "El número de teléfono es obligatorio"
+      "phoneRequired": "El número de teléfono es obligatorio",
+      "waUsernameLabel": "Usuario de WhatsApp",
+      "waUsernamePlaceholder": "thali.vd_",
+      "waUsernameHint": "Enlaza el @usuario de WhatsApp de este contacto para que los próximos mensajes desde un número oculto sigan llegando a este contacto."
     },
     "detailView": {
       "tabs": {
@@ -395,12 +400,26 @@
       },
       "contactInfo": "Información de contacto",
       "unnamed": "Desconocido",
+      "cancel": "Cancelar",
       "contactDetailsDesc": "Datos de contacto",
       "name": "Nombre",
       "phone": "Teléfono",
       "email": "Correo electrónico",
       "company": "Empresa",
       "createdAt": "Fecha de creación",
+      "waUsername": "Usuario de WhatsApp",
+      "waUsernamePlaceholder": "thali.vd_",
+      "waUsernameHint": "Enlaza el @usuario de WhatsApp de este contacto para que los próximos mensajes desde un número oculto sigan llegando a este contacto.",
+      "waUsernameNoPhoneTooltip": "Esta clienta ocultó su número de teléfono (nombres de usuario de WhatsApp). Se muestra su @usuario en su lugar.",
+      "waUsernameUnknown": "Número oculto",
+      "mergeBtn": "Fusionar con otro contacto",
+      "mergeDialogTitle": "Fusionar contactos",
+      "mergeDialogDesc": "Busca un contacto duplicado para fusionarlo con {name}. Sus conversaciones, notas, negocios y etiquetas se moverán aquí, y será eliminado.",
+      "mergeSearchPlaceholder": "Buscar por nombre o teléfono...",
+      "mergeConfirmWarning": "{name} se eliminará permanentemente al fusionar. Esta acción no se puede deshacer.",
+      "mergeConfirmBtn": "Fusionar",
+      "toastMerged": "Contactos fusionados",
+      "toastMergeFailed": "No se pudieron fusionar los contactos",
       "customFields": "Campos personalizados",
       "noCustomFields": "No hay campos personalizados definidos. Créalos en Configuración.",
       "manageFields": "Gestionar campos",

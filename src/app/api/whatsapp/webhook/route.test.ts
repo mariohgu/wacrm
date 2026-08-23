@@ -29,11 +29,18 @@ const h = vi.hoisted(() => ({
     }[],
     /** Error the next storage upload resolves with, if any. */
     storageUploadError: null as { message: string } | null,
-    /** In-memory `contacts` table, used only by the BSUID fallback-id
-     *  path (`findOrCreateContact`'s direct query, bypassing the mocked
-     *  `findExistingContact`). Persists across runWebhook() calls within
-     *  one test so a second message can prove it reused the row. */
-    contactsTable: [] as { id: string; phone: string; name: string }[],
+    /** In-memory `contacts` table, used by findOrCreateContact's
+     *  username-first and BSUID fallback-id paths (bypassing the mocked
+     *  `findExistingContact`, which only covers the plain-phone lookup).
+     *  Persists across runWebhook() calls within one test so a second
+     *  message can prove it reused the row. */
+    contactsTable: [] as {
+      id: string
+      phone: string
+      name: string
+      wa_username: string | null
+      wa_user_id: string | null
+    }[],
   },
 }))
 
@@ -141,24 +148,36 @@ vi.mock('@supabase/supabase-js', () => ({
               }
             },
           }
-        case 'contacts':
-          // Only reached by findOrCreateContact's fallback-id branch
-          // (usingFallbackId) — the normal phone path goes through the
-          // mocked findExistingContact below instead.
+        case 'contacts': {
+          // Reached by findOrCreateContact's username-first lookup and
+          // its BSUID fallback-id branch (usingFallbackId) — the
+          // ordinary phone path goes through the mocked
+          // findExistingContact below instead. A small in-memory table
+          // with a generic `.eq().eq()...maybeSingle()` chain so both
+          // `(account_id, wa_username_normalized)` and
+          // `(account_id, phone)` lookups work through the same mock.
+          const where: Record<string, string> = {}
+          const chain = {
+            eq: (col: string, val: string) => {
+              where[col] = val
+              return chain
+            },
+            maybeSingle: () => {
+              const row = h.state.contactsTable.find((c) => {
+                if (
+                  where.wa_username_normalized !== undefined &&
+                  (c.wa_username ?? '').toLowerCase() !== where.wa_username_normalized
+                ) {
+                  return false
+                }
+                if (where.phone !== undefined && c.phone !== where.phone) return false
+                return true
+              })
+              return Promise.resolve({ data: row ?? null, error: null })
+            },
+          }
           return {
-            select: () => ({
-              eq: () => ({
-                eq: (_col: string, phoneVal: string) => ({
-                  maybeSingle: () =>
-                    Promise.resolve({
-                      data:
-                        h.state.contactsTable.find((c) => c.phone === phoneVal) ??
-                        null,
-                      error: null,
-                    }),
-                }),
-              }),
-            }),
+            select: () => chain,
             insert: (row: Record<string, unknown>) => ({
               select: () => ({
                 single: () => {
@@ -166,14 +185,23 @@ vi.mock('@supabase/supabase-js', () => ({
                     id: `contact-fallback-${h.state.contactsTable.length + 1}`,
                     phone: row.phone as string,
                     name: row.name as string,
+                    wa_username: (row.wa_username as string | null) ?? null,
+                    wa_user_id: (row.wa_user_id as string | null) ?? null,
                   }
                   h.state.contactsTable.push(newRow)
                   return Promise.resolve({ data: newRow, error: null })
                 },
               }),
             }),
-            update: () => ({ eq: () => Promise.resolve({ error: null }) }),
+            update: (patch: Record<string, unknown>) => ({
+              eq: (_col: string, id: string) => {
+                const row = h.state.contactsTable.find((c) => c.id === id)
+                if (row) Object.assign(row, patch)
+                return Promise.resolve({ error: null })
+              },
+            }),
           }
+        }
         default:
           throw new Error(`unexpected table: ${table}`)
       }
@@ -620,6 +648,102 @@ describe('inbound webhook: WhatsApp usernames (BSUID) fallback identity', () => 
     await runWebhook(BSUID_MESSAGE, BSUID_CONTACTS)
 
     expect(h.state.contactsTable[0].name).toBe('thali.vd_')
+  })
+})
+
+describe('inbound webhook: username-based identity (survives a rotated BSUID token)', () => {
+  // The bug report this guards against: a customer messaged once, staff
+  // saved their real phone number, and the customer's NEXT hidden-
+  // number message still spawned a second contact — because the prior
+  // fix deduped purely on the BSUID token, which is a routing
+  // credential that can rotate, not a stable identity. `wa_username` is
+  // the durable signal instead.
+  it('resolves to the same contact when the same username reappears under a different token', async () => {
+    await runWebhook(
+      {
+        id: 'wamid.ROT1',
+        from_user_id: 'PE.TOKEN_OLD',
+        timestamp: '1700000000',
+        type: 'text',
+        text: { body: 'hi' },
+      },
+      [{ profile: { name: 'Thali', username: 'thali.vd_' }, user_id: 'PE.TOKEN_OLD' }],
+    )
+    await runWebhook(
+      {
+        id: 'wamid.ROT2',
+        from_user_id: 'PE.TOKEN_NEW',
+        timestamp: '1700000001',
+        type: 'text',
+        text: { body: 'hi again' },
+      },
+      [{ profile: { name: 'Thali', username: 'thali.vd_' }, user_id: 'PE.TOKEN_NEW' }],
+    )
+
+    expect(h.state.contactsTable).toHaveLength(1)
+    // The routing token was refreshed to the latest one seen.
+    expect(h.state.contactsTable[0].wa_user_id).toBe('PE.TOKEN_NEW')
+  })
+
+  it('matches a hidden-number message to a contact staff already linked by username', async () => {
+    // Simulates staff typing "thali.vd_" into the WhatsApp-username
+    // field on a contact that already has the customer's real phone.
+    h.state.contactsTable.push({
+      id: 'contact-linked',
+      phone: '+51912147223',
+      name: 'Thali Vasquez',
+      wa_username: 'thali.vd_',
+      wa_user_id: null,
+    })
+
+    await runWebhook(
+      {
+        id: 'wamid.LINKED1',
+        from_user_id: 'PE.1128521366369305',
+        timestamp: '1700000000',
+        type: 'text',
+        text: { body: 'hola' },
+      },
+      [
+        {
+          profile: { name: '𐹚𝓕𝓉𝒂𝓍𝒊𝒂꒱', username: 'thali.vd_' },
+          user_id: 'PE.1128521366369305',
+        },
+      ],
+    )
+
+    // No second (BSUID-only) contact was created — the message resolved
+    // straight to the one staff already linked.
+    expect(h.state.contactsTable).toHaveLength(1)
+    expect(h.state.contactsTable[0].id).toBe('contact-linked')
+    expect(h.state.contactsTable[0].wa_user_id).toBe('PE.1128521366369305')
+    // The real phone stays untouched — it's still the trusted one.
+    expect(h.state.contactsTable[0].phone).toBe('+51912147223')
+  })
+
+  it('opportunistically captures a username seen alongside a real phone number', async () => {
+    // Seeds the row the mocked findExistingContact "finds" for the
+    // ordinary phone path (id: 'contact-1'), so the update call this
+    // test asserts on lands somewhere observable.
+    h.state.contactsTable.push({
+      id: 'contact-1',
+      phone: '15551230000',
+      name: 'Ada',
+      wa_username: null,
+      wa_user_id: null,
+    })
+
+    await runWebhook(TEXT_MESSAGE, [
+      {
+        profile: { name: 'Ada', username: 'ada_w' },
+        wa_id: '15551230000',
+        user_id: 'PE.ADATOKEN',
+      },
+    ])
+
+    const row = h.state.contactsTable.find((c) => c.id === 'contact-1')
+    expect(row?.wa_username).toBe('ada_w')
+    expect(row?.wa_user_id).toBe('PE.ADATOKEN')
   })
 })
 

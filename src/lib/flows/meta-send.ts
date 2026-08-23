@@ -10,10 +10,10 @@ import {
 import type { InteractiveMessagePayload } from '@/lib/whatsapp/interactive'
 import { decrypt } from '@/lib/whatsapp/encryption'
 import {
-  sanitizePhoneForMeta,
-  isValidE164,
   phoneVariants,
   isRecipientNotAllowedError,
+  resolveRecipientTarget,
+  type RecipientTarget,
 } from '@/lib/whatsapp/phone-utils'
 import { supabaseAdmin } from './admin-client'
 
@@ -69,7 +69,7 @@ export async function engineSendText(
 
   const { data: contact, error: contactErr } = await db
     .from('contacts')
-    .select('id, phone')
+    .select('id, phone, wa_user_id')
     .eq('id', args.contactId)
     .eq('account_id', args.accountId)
     .maybeSingle()
@@ -77,9 +77,13 @@ export async function engineSendText(
     throw new Error('contact not found for this account')
   }
 
-  const sanitized = sanitizePhoneForMeta(contact.phone)
-  if (!isValidE164(sanitized)) {
-    throw new Error(`contact phone invalid: ${contact.phone}`)
+  let recipientTarget: RecipientTarget
+  try {
+    recipientTarget = resolveRecipientTarget(contact)
+  } catch (err) {
+    throw new Error(
+      `contact phone invalid: ${err instanceof Error ? err.message : contact.phone}`
+    )
   }
 
   const { data: config, error: configErr } = await db
@@ -93,36 +97,40 @@ export async function engineSendText(
 
   const accessToken = decrypt(config.access_token)
 
-  const attempt = async (phone: string): Promise<string> => {
+  const attempt = async (target: RecipientTarget): Promise<string> => {
     const r = await sendTextMessage({
       phoneNumberId: config.phone_number_id,
       accessToken,
-      to: phone,
+      recipientTarget: target,
       text: args.text,
     })
     return r.messageId
   }
 
-  const variants = phoneVariants(sanitized)
-  let workingPhone = sanitized
   let waMessageId = ''
-  let lastError: unknown = null
-  for (const v of variants) {
-    try {
-      waMessageId = await attempt(v)
-      workingPhone = v
-      lastError = null
-      break
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err)
-      if (!isRecipientNotAllowedError(msg)) throw err
-      lastError = err
+  if (recipientTarget.type === 'user_id') {
+    waMessageId = await attempt(recipientTarget)
+  } else {
+    const variants = phoneVariants(recipientTarget.value)
+    let workingPhone = recipientTarget.value
+    let lastError: unknown = null
+    for (const v of variants) {
+      try {
+        waMessageId = await attempt({ type: 'phone', value: v })
+        workingPhone = v
+        lastError = null
+        break
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err)
+        if (!isRecipientNotAllowedError(msg)) throw err
+        lastError = err
+      }
     }
-  }
-  if (lastError) throw lastError
+    if (lastError) throw lastError
 
-  if (workingPhone !== sanitized) {
-    await db.from('contacts').update({ phone: workingPhone }).eq('id', contact.id)
+    if (workingPhone !== recipientTarget.value) {
+      await db.from('contacts').update({ phone: workingPhone }).eq('id', contact.id)
+    }
   }
 
   const { error: msgErr } = await db.from('messages').insert({
@@ -179,7 +187,7 @@ export async function engineSendMedia(
 
   const { data: contact, error: contactErr } = await db
     .from('contacts')
-    .select('id, phone')
+    .select('id, phone, wa_user_id')
     .eq('id', args.contactId)
     .eq('account_id', args.accountId)
     .maybeSingle()
@@ -187,9 +195,13 @@ export async function engineSendMedia(
     throw new Error('contact not found for this account')
   }
 
-  const sanitized = sanitizePhoneForMeta(contact.phone)
-  if (!isValidE164(sanitized)) {
-    throw new Error(`contact phone invalid: ${contact.phone}`)
+  let recipientTarget: RecipientTarget
+  try {
+    recipientTarget = resolveRecipientTarget(contact)
+  } catch (err) {
+    throw new Error(
+      `contact phone invalid: ${err instanceof Error ? err.message : contact.phone}`
+    )
   }
 
   const { data: config, error: configErr } = await db
@@ -203,11 +215,11 @@ export async function engineSendMedia(
 
   const accessToken = decrypt(config.access_token)
 
-  const attempt = async (phone: string): Promise<string> => {
+  const attempt = async (target: RecipientTarget): Promise<string> => {
     const r = await sendMediaMessage({
       phoneNumberId: config.phone_number_id,
       accessToken,
-      to: phone,
+      recipientTarget: target,
       kind: args.kind,
       link: args.link,
       caption: args.caption,
@@ -216,26 +228,30 @@ export async function engineSendMedia(
     return r.messageId
   }
 
-  const variants = phoneVariants(sanitized)
-  let workingPhone = sanitized
   let waMessageId = ''
-  let lastError: unknown = null
-  for (const v of variants) {
-    try {
-      waMessageId = await attempt(v)
-      workingPhone = v
-      lastError = null
-      break
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err)
-      if (!isRecipientNotAllowedError(msg)) throw err
-      lastError = err
+  if (recipientTarget.type === 'user_id') {
+    waMessageId = await attempt(recipientTarget)
+  } else {
+    const variants = phoneVariants(recipientTarget.value)
+    let workingPhone = recipientTarget.value
+    let lastError: unknown = null
+    for (const v of variants) {
+      try {
+        waMessageId = await attempt({ type: 'phone', value: v })
+        workingPhone = v
+        lastError = null
+        break
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err)
+        if (!isRecipientNotAllowedError(msg)) throw err
+        lastError = err
+      }
     }
-  }
-  if (lastError) throw lastError
+    if (lastError) throw lastError
 
-  if (workingPhone !== sanitized) {
-    await db.from('contacts').update({ phone: workingPhone }).eq('id', contact.id)
+    if (workingPhone !== recipientTarget.value) {
+      await db.from('contacts').update({ phone: workingPhone }).eq('id', contact.id)
+    }
   }
 
   // content_type='image'|'video'|'document' — these are already in the
@@ -331,7 +347,7 @@ async function sendInteractiveViaMeta(
   // Migration 017 moved both tables to account-scoped tenancy.
   const { data: contact, error: contactErr } = await db
     .from('contacts')
-    .select('id, phone')
+    .select('id, phone, wa_user_id')
     .eq('id', input.contactId)
     .eq('account_id', input.accountId)
     .maybeSingle()
@@ -339,9 +355,13 @@ async function sendInteractiveViaMeta(
     throw new Error('contact not found for this account')
   }
 
-  const sanitized = sanitizePhoneForMeta(contact.phone)
-  if (!isValidE164(sanitized)) {
-    throw new Error(`contact phone invalid: ${contact.phone}`)
+  let recipientTarget: RecipientTarget
+  try {
+    recipientTarget = resolveRecipientTarget(contact)
+  } catch (err) {
+    throw new Error(
+      `contact phone invalid: ${err instanceof Error ? err.message : contact.phone}`
+    )
   }
 
   const { data: config, error: configErr } = await db
@@ -355,12 +375,12 @@ async function sendInteractiveViaMeta(
 
   const accessToken = decrypt(config.access_token)
 
-  const attempt = async (phone: string): Promise<string> => {
+  const attempt = async (target: RecipientTarget): Promise<string> => {
     if (input.kind === 'buttons') {
       const r = await sendInteractiveButtons({
         phoneNumberId: config.phone_number_id,
         accessToken,
-        to: phone,
+        recipientTarget: target,
         bodyText: input.bodyText,
         buttons: input.buttons,
         headerText: input.headerText,
@@ -371,7 +391,7 @@ async function sendInteractiveViaMeta(
     const r = await sendInteractiveList({
       phoneNumberId: config.phone_number_id,
       accessToken,
-      to: phone,
+      recipientTarget: target,
       bodyText: input.bodyText,
       buttonLabel: input.buttonLabel,
       sections: input.sections,
@@ -383,27 +403,32 @@ async function sendInteractiveViaMeta(
 
   // Same phone-variant retry as automations/meta-send.ts. Numbers
   // registered with/without a trunk 0 + Meta's sandbox quirks all
-  // need this to reliably land a message.
-  const variants = phoneVariants(sanitized)
-  let workingPhone = sanitized
+  // need this to reliably land a message. A BSUID target has no such
+  // ambiguity — one attempt, no retry, nothing to auto-correct.
   let waMessageId = ''
-  let lastError: unknown = null
-  for (const v of variants) {
-    try {
-      waMessageId = await attempt(v)
-      workingPhone = v
-      lastError = null
-      break
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err)
-      if (!isRecipientNotAllowedError(msg)) throw err
-      lastError = err
+  if (recipientTarget.type === 'user_id') {
+    waMessageId = await attempt(recipientTarget)
+  } else {
+    const variants = phoneVariants(recipientTarget.value)
+    let workingPhone = recipientTarget.value
+    let lastError: unknown = null
+    for (const v of variants) {
+      try {
+        waMessageId = await attempt({ type: 'phone', value: v })
+        workingPhone = v
+        lastError = null
+        break
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err)
+        if (!isRecipientNotAllowedError(msg)) throw err
+        lastError = err
+      }
     }
-  }
-  if (lastError) throw lastError
+    if (lastError) throw lastError
 
-  if (workingPhone !== sanitized) {
-    await db.from('contacts').update({ phone: workingPhone }).eq('id', contact.id)
+    if (workingPhone !== recipientTarget.value) {
+      await db.from('contacts').update({ phone: workingPhone }).eq('id', contact.id)
+    }
   }
 
   // Persist the bot's prompt to the messages table so it appears in

@@ -229,17 +229,74 @@ can contain enough stray digits to normalize into a plausible-looking
 phone, the raw id is used as an exact-match dedup/storage key instead of
 going through `findExistingContact`'s digit-suffix `phonesMatch` logic.
 
-This is still a **stopgap** for the duplicate-contact symptom only —
-outbound sends to such a contact still fail (`sanitizePhoneForMeta`/
-`isValidE164` in `src/lib/flows/meta-send.ts` /
-`src/lib/automations/meta-send.ts` reject a non-phone stored value like
-`"PE.1128521366369305"` — the error just changes from "contact not
-found" to "contact phone invalid" once dedup is fixed). The real fix
-needs a dedicated identity column (`contacts.phone` is `NOT NULL` and
-drives a generated `phone_normalized` column + a per-account unique
-index, migration 022 — a BSUID doesn't fit that model), an updated
-migration, and BSUID-aware outbound sending across every `meta-send.ts`
-call site plus broadcasts. Not done yet.
+**Update, 2026-08-22 (same day, later): the BSUID token itself is not a
+stable identity.** Deduping purely on `wa_user_id`/`from_user_id` (the
+paragraphs above) breaks once Meta rotates that token for a returning
+customer — confirmed in production: a contact whose real phone had
+already been saved manually still got a second "new" row under a fresh
+BSUID. The one signal that *is* durable is `contacts[].profile.username`
+(the public @handle, e.g. `"thali.vd_"` — plain ASCII, unlike the
+possibly-decorative `name`). Migration
+[040_wa_username_identity.sql](supabase/migrations/040_wa_username_identity.sql)
+adds it as a proper identity column, so contact identity for a
+WhatsApp-usernames customer is now a **three-signal model**:
+
+1. **`phone`** — the real, stable identifier when Meta discloses it
+   (unchanged, still `NOT NULL`, still drives `phone_normalized` +
+   migration 022's per-account unique index).
+2. **`wa_username`** (+ generated `wa_username_normalized`, lowercased,
+   unique per account when non-null) — the durable identity for a
+   customer who has hidden her number. `processMessage` checks this
+   **first**, before the phone/BSUID fallback: a match here reuses the
+   contact regardless of what token or phone-like value shows up this
+   time. Editable by staff (`contact-form.tsx`'s create/edit dialog,
+   `contact-detail-view.tsx`'s Details tab) to manually link a known
+   username onto an existing phone-having contact.
+3. **`wa_user_id`** — the current/last-known BSUID routing token.
+   Refreshed automatically on every inbound message; deliberately has
+   no uniqueness constraint (plain index only) since it can rotate and
+   two rows could transiently share a stale value. Read-only in the
+   UI. Now also used for outbound sends — see below.
+
+Capture is **opportunistic**: even a message that arrives with a real,
+visible phone number also gets its `wa_username`/`wa_user_id` stored (if
+present and not already known) onto that same contact, so if that same
+customer later hides her number, the system already knows who she is —
+no manual linking needed for anyone captured this way. Manual linking
+(step 2 above) exists for the case where the BSUID-only contact and the
+phone-having contact were already created as two separate rows *before*
+this existed.
+
+**Cleaning up a pre-existing duplicate pair**: `merge_contacts(survivor,
+loser)` (same migration) re-points a loser contact's conversations,
+notes, deals, tags, custom values, and non-active flow runs onto a
+survivor and deletes the loser — same table breakdown as migration 022's
+`merge_duplicate_contacts()`, but for an explicit id pair chosen by
+staff rather than an automatic phone-group scan. `SECURITY DEFINER`,
+`EXECUTE` granted to `service_role` only (never `authenticated` — it
+bypasses RLS and deletes rows, so it must never be reachable by direct
+RPC from the browser client). The only caller is
+`POST /api/contacts/[id]/merge`
+([route.ts](<src/app/api/contacts/[id]/merge/route.ts>)), which requires
+the `admin` role and verifies both contact ids belong to the caller's
+own account before invoking the RPC through
+[src/lib/contacts/admin-client.ts](src/lib/contacts/admin-client.ts)'s
+service-role client — the API route is the only place that
+authorization happens; the SQL function trusts its caller completely.
+Reachable from `contact-detail-view.tsx`'s "Merge with another contact"
+button (search-and-confirm dialog).
+
+**Outbound sending to a username-only/BSUID-only contact now works**
+(see the 2026-08-22 "Outbound sends via `recipient`" entry below) for
+Inbox replies, the public messages API, Flows, Automations, and
+reactions — every one-to-one/conversational send path builds a Meta
+`recipient` field (the BSUID) instead of `to` (phone-only) when
+`contacts.phone` isn't a real phone number. **Broadcasts (campaign
+sends) are the one remaining gap** — `src/lib/whatsapp/broadcast-core.ts`
+and `src/app/api/whatsapp/broadcast/route.ts` never query `contacts` at
+send time (they're phone-string-driven end to end), so there's no
+`wa_user_id` to route through without new schema/UI plumbing. Not yet
+started.
 
 # Change log (Claude Code sessions)
 
@@ -648,3 +705,218 @@ hidden-number customer still don't deliver. The full fix (dedicated
 identity column, migration, BSUID-aware outbound sending across every
 `meta-send.ts` call site plus broadcasts) remains a separate,
 explicitly-deferred follow-up.
+
+## 2026-08-22 — WhatsApp contact identity: dedupe by username, not just by BSUID token
+
+Same day, third round on this issue. The user confirmed the prior
+BSUID-token stopgap still isn't enough: even after **manually saving the
+customer's real phone number**, a new duplicate conversation appeared
+again under the same `PE.1128521366369305` code — because that token is
+a rotating routing credential, not a stable identity, while
+`profile.username` (e.g. `"thali.vd_"`) stays constant. Production
+screenshot showed exactly this: two rows for the same customer, same
+visible name, one keyed by the BSUID, one by the real phone, with no
+link between them. See the rewritten **"WhatsApp contact identity"**
+section above for the full three-signal model (phone / username /
+routing token) this introduces.
+
+Touched:
+
+- [supabase/migrations/040_wa_username_identity.sql](supabase/migrations/040_wa_username_identity.sql)
+  — **new migration, must be applied**: `contacts.wa_username` (+
+  generated, lowercased `wa_username_normalized`) with a per-account
+  unique partial index (mirrors migration 022's `phone_normalized`
+  pattern exactly); `contacts.wa_user_id` (current/last-known BSUID,
+  plain index, deliberately not unique — it can rotate); new
+  `merge_contacts(p_survivor_id, p_loser_id)` SQL function for
+  collapsing an explicit duplicate pair, `SECURITY DEFINER`, `EXECUTE`
+  granted to `service_role` only.
+  - **Self-caught security issue while writing this migration**: first
+    draft granted `EXECUTE` to `authenticated`, which — since the
+    function is `SECURITY DEFINER` and bypasses RLS — would have let
+    any logged-in user of any account merge/delete contacts in any
+    other account via a direct Supabase RPC call from the browser,
+    bypassing the admin-role + same-account check meant to live in the
+    API route. Corrected before shipping to `service_role`-only,
+    matching migration 029's `claim_ai_reply_slot` precedent.
+- [src/app/api/whatsapp/webhook/route.ts](src/app/api/whatsapp/webhook/route.ts)
+  — `findOrCreateContact` gained `waUsername`/`waUserId` params and now
+  checks `wa_username_normalized` **first**, before the phone/BSUID
+  fallback; a match reuses that contact and refreshes `wa_user_id` (and
+  `phone`, only when the new value actually looks like a phone) without
+  creating anything new. Every resolution path — username match, phone
+  fallback, and new-contact insert — also opportunistically captures
+  `wa_username`/`wa_user_id` when Meta includes them, even alongside a
+  real visible phone number, so a customer who later hides her number
+  is already known.
+  - **Bug caught by the new tests, fixed before shipping**: `wa_user_id`
+    was initially written from `rawSenderId`, which resolves to the
+    phone digits (not the BSUID) whenever `message.from` is present —
+    so a phone-visible message that also carried a username stored the
+    phone in `wa_user_id` instead of the routing token. Fixed by
+    computing `waUserId` independently
+    (`message.from_user_id ?? contact.user_id ?? null`, never falling
+    back to `message.from`) and threading it through as its own
+    parameter, distinct from `rawSenderId`.
+- [src/app/api/whatsapp/webhook/route.test.ts](src/app/api/whatsapp/webhook/route.test.ts)
+  — mock `contacts` table lookup generalized from a rigid two-`.eq()`
+  chain to a flexible one supporting both username- and phone-based
+  queries; `update()` is now a real mutation instead of a no-op, since
+  correctness here depends on updates persisting across calls within a
+  test. Three new tests: same username reappearing under a different
+  BSUID resolves to the same contact (the exact regression reported);
+  a hidden-number message matches a contact staff already linked by
+  username, without touching its real phone; a username seen alongside
+  a real phone gets captured opportunistically. 21/21 passing.
+- [src/types/index.ts](src/types/index.ts) — `Contact` gains
+  `wa_username`/`wa_user_id`.
+- [src/lib/whatsapp/phone-utils.ts](src/lib/whatsapp/phone-utils.ts) —
+  extracted the webhook's inline `/^\+?\d{5,15}$/` check into an
+  exported `looksLikePhoneNumber`, now shared by the webhook and the
+  contacts UI.
+- [src/components/contacts/contact-form.tsx](src/components/contacts/contact-form.tsx),
+  [src/components/contacts/contact-detail-view.tsx](src/components/contacts/contact-detail-view.tsx)
+  — new "WhatsApp username" field in both the create/edit dialog and
+  the Details tab, so staff can manually link a known username onto an
+  existing (phone-having) contact. `contact-detail-view.tsx` also gained
+  a "Merge with another contact" button opening a search-and-confirm
+  dialog (`MergeContactDialog`, defined in the same file) that calls the
+  new merge endpoint below — the currently-viewed contact is always the
+  survivor, the picked one is deleted after its data is re-pointed.
+- [src/app/api/contacts/[id]/merge/route.ts](<src/app/api/contacts/[id]/merge/route.ts>)
+  — new, `admin`-role-gated: verifies both the survivor (`[id]`) and the
+  posted `loser_id` belong to the caller's own account (via the
+  RLS-scoped session client), then invokes `merge_contacts` through
+  [src/lib/contacts/admin-client.ts](src/lib/contacts/admin-client.ts)'s
+  service-role client — the only thing allowed to call a
+  `service_role`-only RPC.
+- [src/app/(dashboard)/contacts/page.tsx](<src/app/(dashboard)/contacts/page.tsx>)
+  — the contacts list table's phone column now shows `@username` (or a
+  "hidden number" fallback) instead of the raw BSUID string when
+  `contact.phone` doesn't look like a real phone number, mirroring the
+  detail view's existing header-chip treatment.
+- `messages/en.json`, `es.json`, `ko.json` — new keys for the username
+  field (form + detail view), the non-phone display badge, and the
+  merge dialog, in all three locales.
+
+Verified: `npx tsc --noEmit` clean; `npx eslint` on every touched file
+(0 errors, only pre-existing unrelated warnings — unused imports/hook
+deps predating this session's edits); `npx vitest run
+src/i18n/messages.test.ts` (4/4, locale parity holds);
+`npx vitest run src/app/api/whatsapp/webhook/route.test.ts` (21/21);
+full `npx vitest run` (848/850 — only the same pre-existing, unrelated
+`date-utils.test.ts` `mondayIndex` timezone flakiness). Not verified
+in-browser (no Supabase login credentials available this session, same
+limitation as every prior UI change this session) — manual recommended
+before considering this closed: link `thali.vd_` to the phone-having
+contact, use "Merge with another contact" to fold the BSUID-only
+duplicate into it, then confirm the next message from that customer
+(hidden number or not) lands on the single surviving contact.
+
+> **Migration required for self-hosters:** apply
+> `supabase/migrations/040_wa_username_identity.sql` before using the
+> new "WhatsApp username" field or the merge feature.
+
+**Still deliberately out of scope, unchanged from prior entries:**
+outbound sending to a username-only/BSUID-only contact (`recipient`
+field vs. `to`) — a distinct, not-yet-started follow-up.
+
+## 2026-08-22 — Outbound sends via `recipient`: reply to a WhatsApp-usernames contact
+
+Same day, fourth round. User hit this in production: replying from the
+Inbox to "thali.vd_" (a hidden-number contact) failed with
+`Failed to send: Invalid phone number format`, and asked whether the
+username/merge work above already fixed it (it didn't — that work never
+touched outbound sending) and whether her real name/phone could be
+saved (already possible, unrelated to this bug). This entry ships the
+`recipient`-field follow-up that every prior entry in this section
+flagged as deferred.
+
+Root cause: `contacts.phone` is `NOT NULL`, so a hidden-number contact
+has its BSUID (`"PE.1128521366369305"`) parked there as a placeholder.
+Every send path validated `phone` as a real E.164 number before calling
+Meta and threw when it wasn't one — including a **third, previously
+undocumented copy** of that guard in `src/lib/whatsapp/send-message.ts`
+(the Inbox composer + public `/api/v1/messages` path) beyond the two
+this file already called out in `flows/meta-send.ts` /
+`automations/meta-send.ts`.
+
+**Confirmed against Meta's own docs** (WebFetch + WebSearch this
+session): the outbound body needs a `recipient` field (the BSUID)
+instead of `to` (phone-only) — `{ messaging_product, recipient_type:
+"individual", recipient: "PE.1128521366369305", type, ... }`. At least
+one of `to`/`recipient` is required; `to` wins if both are present;
+`recipient_type` stays `"individual"` either way.
+
+Touched:
+
+- [src/lib/whatsapp/phone-utils.ts](src/lib/whatsapp/phone-utils.ts) —
+  new `RecipientTarget` union (`{type:'phone',value}` |
+  `{type:'user_id',value}`) and `resolveRecipientTarget(contact)`: real
+  phone → `to`; BSUID placeholder (or a phone-shaped-but-invalid value)
+  with a `wa_user_id` on file → `recipient`; neither → throws. One
+  helper shared by every call site below instead of re-deriving the
+  branch four times.
+- [src/lib/whatsapp/meta-api.ts](src/lib/whatsapp/meta-api.ts) — all 6
+  send functions (`sendTextMessage`, `sendMediaMessage`,
+  `sendTemplateMessage`, `sendReactionMessage`,
+  `sendInteractiveButtons`, `sendInteractiveList`) take
+  `recipientTarget: RecipientTarget` instead of `to: string`, and build
+  the body with `...(type === 'phone' ? {to} : {recipient})`.
+- [src/lib/whatsapp/send-message.ts](src/lib/whatsapp/send-message.ts)
+  — priority fix (backs both the Inbox composer and the public API).
+  Already had the full `Contact` row in scope, so no query widening
+  needed. The phone-variant retry loop (trunk-prefix guessing) and the
+  "auto-correct `contacts.phone`" write only make sense for a real
+  phone — both are skipped for a `user_id` target (a BSUID has no trunk
+  prefix; there's nothing to auto-correct since `wa_user_id` is
+  refreshed only by the inbound webhook).
+- [src/lib/flows/meta-send.ts](src/lib/flows/meta-send.ts),
+  [src/lib/automations/meta-send.ts](src/lib/automations/meta-send.ts)
+  — same treatment across all four engine senders (`engineSendText`,
+  `engineSendMedia`, `sendInteractiveViaMeta` in Flows; `sendViaMeta` in
+  Automations); each widened its `contacts` select to add `wa_user_id`.
+- [src/app/api/whatsapp/react/route.ts](src/app/api/whatsapp/react/route.ts)
+  — reactions, the simplest call site (no retry loop to begin with);
+  widened the nested `contacts` join to include `wa_user_id`.
+- [src/app/api/whatsapp/broadcast/route.ts](src/app/api/whatsapp/broadcast/route.ts),
+  [src/lib/whatsapp/broadcast-core.ts](src/lib/whatsapp/broadcast-core.ts)
+  — **not** given BSUID support (see below); adapted mechanically to the
+  new `meta-api.ts` signature by wrapping their existing phone string in
+  `{type:'phone', value}`, since changing `sendTemplateMessage`'s args
+  shape broke them at the type level regardless of scope.
+- Tests: `phone-utils.test.ts` (new `resolveRecipientTarget` cases),
+  `meta-api.test.ts` / `meta-api.media.test.ts` (fixtures ported from
+  `to` to `recipientTarget`, plus a new case per function group
+  asserting a `user_id` target produces `recipient` and omits `to`
+  entirely), `send-message.test.ts` (new describe block: BSUID contact
+  sends via `recipient` with no `contacts.phone` write; no-`wa_user_id`
+  case throws 400 before any Meta call), and **new**
+  `flows/meta-send.test.ts` / `automations/meta-send.test.ts` (neither
+  engine had direct test coverage before — `automations/engine.test.ts`
+  mocks the whole `meta-send` module away — each new file covers the
+  real-phone/unchanged-retry case, the single-call BSUID case, and the
+  throws-before-any-Meta-call case), and
+  `api/whatsapp/send/route.test.ts` (one pre-existing assertion on
+  `args.to` updated to `args.recipientTarget`).
+
+**Deliberately excluded — broadcasts (campaign sends).** Both broadcast
+pipelines (`broadcast-core.ts`'s `deliverBroadcast`, and the dashboard's
+`api/whatsapp/broadcast/route.ts`) are phone-string-driven end to end
+and never query `contacts` at delivery time — there's no `wa_user_id` in
+scope to route through without new schema work (threading it through
+`BroadcastPlan.planned` / `broadcast_recipients`) and wizard UI changes.
+Doesn't block the reported bug (1:1 replies), so left as a distinct,
+not-yet-started follow-up — same as noted in every prior entry in this
+section, just narrowed now that the conversational paths are done.
+
+Verified: `npx tsc --noEmit` clean (the `to` → `recipientTarget` rename
+is a breaking type change, so this caught every call site including the
+two broadcast files); `npx eslint` on every touched file (0
+errors/warnings); `npx vitest run` on all touched/new test files (76
+passing); full `npx vitest run` (864/866 — only the same pre-existing,
+unrelated `date-utils.test.ts` `mondayIndex` timezone flakiness). Not
+verified against a live Meta send this session (no WhatsApp credentials
+available) — manual recommended: reply from the Inbox to a contact whose
+`phone` holds a BSUID placeholder (e.g. "thali.vd_") and confirm the
+message delivers instead of showing "Invalid phone number format".

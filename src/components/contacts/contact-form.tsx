@@ -55,6 +55,7 @@ export function ContactForm({
   const [phone, setPhone] = useState('');
   const [email, setEmail] = useState('');
   const [company, setCompany] = useState('');
+  const [waUsername, setWaUsername] = useState('');
   const [saving, setSaving] = useState(false);
 
   // Duplicate-phone detection for NEW contacts. `exact` (same digits)
@@ -76,6 +77,7 @@ export function ContactForm({
       setPhone(contact?.phone ?? '');
       setEmail(contact?.email ?? '');
       setCompany(contact?.company ?? '');
+      setWaUsername(contact?.wa_username ?? '');
       setSelectedTagIds(contactTags.map((ct) => ct.tag_id));
       setDupMatch(null);
       fetchTags();
@@ -157,6 +159,7 @@ export function ContactForm({
             phone: phone.trim(),
             email: email.trim() || null,
             company: company.trim() || null,
+            wa_username: waUsername.trim() || null,
             updated_at: new Date().toISOString(),
           })
           .eq('id', contactId);
@@ -171,6 +174,7 @@ export function ContactForm({
             phone: phone.trim(),
             email: email.trim() || null,
             company: company.trim() || null,
+            wa_username: waUsername.trim() || null,
           })
           .select('id')
           .single();
@@ -294,6 +298,22 @@ export function ContactForm({
                 {t('phoneHint')}
               </p>
             )}
+          </div>
+
+          <div className="space-y-2">
+            <Label htmlFor="cf-wa-username" className="text-muted-foreground">
+              {t('waUsernameLabel')}
+            </Label>
+            <Input
+              id="cf-wa-username"
+              value={waUsername}
+              onChange={(e) => setWaUsername(e.target.value)}
+              placeholder={t('waUsernamePlaceholder')}
+              className="bg-muted border-border text-foreground placeholder:text-muted-foreground"
+            />
+            <p className="text-xs text-muted-foreground">
+              {t('waUsernameHint')}
+            </p>
           </div>
 
           <div className="space-y-2">

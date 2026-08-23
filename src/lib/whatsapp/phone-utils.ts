@@ -41,6 +41,65 @@ export function isValidE164(phone: string): boolean {
 }
 
 /**
+ * Looser shape check than `isValidE164` — "could this be a phone
+ * number at all" (digits only, optional leading '+', 5-15 chars),
+ * rather than "is this specifically valid." Used to tell a real Meta
+ * phone-number identifier apart from a WhatsApp-usernames BSUID (e.g.
+ * "PE.1128521366369305" — letters and a dot, never matches this),
+ * regardless of which digits happen to be embedded in the BSUID.
+ * Shared by the inbound webhook's contact resolution and the contacts
+ * UI (to badge a non-phone `phone` value instead of rendering it as
+ * one) — see CLAUDE.md's "WhatsApp contact identity" section.
+ */
+export function looksLikePhoneNumber(value: string): boolean {
+  return /^\+?\d{5,15}$/.test(value)
+}
+
+/**
+ * What to put in an outbound Meta send body: either `to` (a real
+ * phone number) or `recipient` (a WhatsApp-usernames BSUID, e.g.
+ * "PE.1128521366369305"). Mutually exclusive on the wire per Meta's
+ * own rule — at least one required; if both are present `to` wins; omit
+ * `to` entirely when sending via `recipient`. See CLAUDE.md's
+ * "WhatsApp contact identity" section.
+ */
+export type RecipientTarget =
+  | { type: 'phone'; value: string }
+  | { type: 'user_id'; value: string }
+
+export interface RecipientResolvable {
+  phone: string | null
+  wa_user_id?: string | null
+}
+
+/**
+ * Decide how to address a contact for an outbound Meta send.
+ *
+ * `contacts.phone` is NOT NULL, so a hidden-number contact has a BSUID
+ * string parked there as a placeholder (fails `looksLikePhoneNumber` —
+ * letters + a dot never match). Real phones route via `to`; anything
+ * that isn't phone-shaped, or is phone-shaped but fails E.164, falls
+ * back to `wa_user_id` when we have one. Throws when neither works —
+ * callers translate that into their own error shape.
+ */
+export function resolveRecipientTarget(contact: RecipientResolvable): RecipientTarget {
+  if (contact.phone && looksLikePhoneNumber(contact.phone)) {
+    const sanitized = sanitizePhoneForMeta(contact.phone)
+    if (isValidE164(sanitized)) {
+      return { type: 'phone', value: sanitized }
+    }
+  }
+  if (contact.wa_user_id) {
+    return { type: 'user_id', value: contact.wa_user_id }
+  }
+  throw new Error(
+    contact.phone && looksLikePhoneNumber(contact.phone)
+      ? 'Invalid phone number format'
+      : 'Contact has no phone number or WhatsApp user id on file'
+  )
+}
+
+/**
  * Generate plausible phone number variants for retry when Meta's
  * sandbox rejects a number with error #131030 ("not in allowed list").
  *

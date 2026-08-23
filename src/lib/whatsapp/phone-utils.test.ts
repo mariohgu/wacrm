@@ -5,6 +5,7 @@ import {
   normalizePhone,
   phoneVariants,
   phonesMatch,
+  resolveRecipientTarget,
   sanitizePhoneForMeta,
 } from "./phone-utils";
 
@@ -133,6 +134,47 @@ describe("phoneVariants", () => {
   it("returns just the original when the number is too short for any CC slice", () => {
     // 1-char input is shorter than all ccLen values; both loops skip.
     expect(phoneVariants("1")).toEqual(["1"]);
+  });
+});
+
+describe("resolveRecipientTarget", () => {
+  it("routes a real E.164 phone via `to`", () => {
+    expect(resolveRecipientTarget({ phone: "+51912147223" })).toEqual({
+      type: "phone",
+      value: "51912147223",
+    });
+  });
+
+  it("falls back to wa_user_id when phone is a BSUID placeholder", () => {
+    expect(
+      resolveRecipientTarget({
+        phone: "PE.1128521366369305",
+        wa_user_id: "PE.1128521366369305",
+      }),
+    ).toEqual({ type: "user_id", value: "PE.1128521366369305" });
+  });
+
+  it("throws when phone is a BSUID placeholder and there is no wa_user_id", () => {
+    expect(() =>
+      resolveRecipientTarget({ phone: "PE.1128521366369305" }),
+    ).toThrow(/no phone number or WhatsApp user id/);
+  });
+
+  it("falls back to wa_user_id when phone is shaped like a number but fails E.164", () => {
+    // Starts with 0 in international form — looksLikePhoneNumber matches
+    // (digits only) but isValidE164 rejects it.
+    expect(
+      resolveRecipientTarget({
+        phone: "0044700000000",
+        wa_user_id: "US.987654321",
+      }),
+    ).toEqual({ type: "user_id", value: "US.987654321" });
+  });
+
+  it("throws 'Invalid phone number format' when phone-shaped-but-invalid and no fallback", () => {
+    expect(() =>
+      resolveRecipientTarget({ phone: "0044700000000" }),
+    ).toThrow(/Invalid phone number format/);
   });
 });
 

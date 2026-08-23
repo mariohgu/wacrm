@@ -25,7 +25,7 @@ function okFetch() {
 const BASE = {
   phoneNumberId: "test-phone",
   accessToken: "test-token",
-  to: "1234567890",
+  recipientTarget: { type: "phone", value: "1234567890" },
   link: "https://cdn.example.com/file",
 } as const;
 
@@ -75,5 +75,16 @@ describe("sendMediaMessage — payload shape", () => {
     await expect(
       sendMediaMessage({ ...BASE, link: "", kind: "image" }),
     ).rejects.toThrow(/requires a link/);
+  });
+
+  it("sends `recipient` (not `to`) for a BSUID target", async () => {
+    await sendMediaMessage({
+      ...BASE,
+      recipientTarget: { type: "user_id", value: "PE.1128521366369305" },
+      kind: "image",
+    });
+    const body = captured as unknown as Record<string, unknown>;
+    expect(body.recipient).toBe("PE.1128521366369305");
+    expect(body).not.toHaveProperty("to");
   });
 });

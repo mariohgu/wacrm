@@ -218,7 +218,7 @@ describe('POST /api/whatsapp/send — contact_id template path', () => {
       unknown
     >
     // Meta wants the bare E.164 digits — sanitizePhoneForMeta strips the '+'.
-    expect(args.to).toBe('15551234567')
+    expect(args.recipientTarget).toEqual({ type: 'phone', value: '15551234567' })
     expect(args.templateName).toBe('order_update')
 
     // The outbound message was persisted under the new conversation.

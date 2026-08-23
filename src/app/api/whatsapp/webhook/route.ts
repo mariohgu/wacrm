@@ -3,7 +3,7 @@ import { createClient } from '@supabase/supabase-js'
 import { decrypt, encrypt, isLegacyFormat } from '@/lib/whatsapp/encryption'
 import { getMediaUrl, downloadMedia } from '@/lib/whatsapp/meta-api'
 import { mirrorInboundMedia } from '@/lib/whatsapp/mirror-inbound-media'
-import { normalizePhone } from '@/lib/whatsapp/phone-utils'
+import { normalizePhone, looksLikePhoneNumber } from '@/lib/whatsapp/phone-utils'
 import { findExistingContact, isUniqueViolation } from '@/lib/contacts/dedupe'
 import { reopenClosedConversation } from '@/lib/conversations/reopen'
 import { verifyMetaWebhookSignature } from '@/lib/whatsapp/webhook-signature'
@@ -622,6 +622,18 @@ async function processMessage(
   // username-having customer, which renders as garbled boxes in the
   // inbox — prefer username when Meta supplies one.
   const contactName = contact.profile.username || contact.profile.name
+  // The BSUID (`rawSenderId`) can rotate over time — it's a routing
+  // token, not a stable identity (see CLAUDE.md). `profile.username` is
+  // the durable signal, so it takes priority in findOrCreateContact
+  // regardless of whether this particular delivery also has a real
+  // phone number.
+  const waUsername = contact.profile.username ?? null
+  // The actual BSUID, independent of whether a real phone was ALSO
+  // present on this delivery. Kept separate from `rawSenderId` (which
+  // resolves to the phone when one is present, per Meta's own `to`-
+  // takes-precedence-over-`recipient` rule) so `wa_user_id` never ends
+  // up holding a phone number — it's meant purely as a routing token.
+  const waUserId = message.from_user_id ?? contact.user_id ?? null
 
   // Find or create contact
   const contactOutcome = await findOrCreateContact(
@@ -629,7 +641,9 @@ async function processMessage(
     configOwnerUserId,
     senderPhone,
     contactName,
-    rawSenderId
+    rawSenderId,
+    waUsername,
+    waUserId
   )
   if (!contactOutcome) return
   const contactRecord = contactOutcome.contact
@@ -1155,45 +1169,87 @@ async function findOrCreateContact(
   // normalized `phone` as a fallback identity key. See the
   // `usingFallbackId` branch below.
   rawSenderId: string,
+  // `contact.profile.username`, when Meta supplies one. See the
+  // username-first branch below — this is the durable identity signal,
+  // unlike `rawSenderId` (a BSUID routing token that can rotate).
+  waUsername: string | null,
+  // The BSUID itself (message.from_user_id / contact.user_id), kept
+  // separate from `rawSenderId` — which resolves to the phone number
+  // when one is present — so this never ends up holding a phone value.
+  waUserId: string | null,
 ): Promise<ContactOutcome | null> {
   const db = supabaseAdmin()
 
-  // Meta's "WhatsApp usernames" rollout (BSUID, live since 2026-03-31):
-  // when a customer hides their phone number, `message.from` is
-  // ABSENT entirely (not present-but-garbled) and the identifier
-  // instead lives in `message.from_user_id` / `contact.user_id` — a
-  // Business-Scoped User ID, format "CC.digits" (e.g.
-  // "PE.1128521366369305"), confirmed against a real payload from an
-  // affected account. Detecting this from `normalizePhone(from) === ''`
-  // is NOT reliable — a BSUID can happen to contain enough stray digits
-  // to normalize into a plausible-looking (but meaningless, and
-  // possibly colliding) phone-shaped string. Instead, check the RAW id
-  // itself: a real Meta phone-number identifier is always digits-only
-  // (optionally with a leading '+'). Anything else — letters, dots,
-  // etc. — is treated as an opaque non-phone identifier, regardless of
-  // which digits happen to be embedded in it.
-  //
-  // Without this, the digit-suffix dedup in `findExistingContact` bails
-  // immediately on an empty/garbled normalized phone (and the DB's
-  // unique index on migration 022 explicitly excludes empty
-  // `phone_normalized`), so every inbound message from such a customer
-  // used to create a brand-new contact instead of finding the existing
-  // one — see the CLAUDE.md change log entry for the full symptom.
-  //
-  // Stopgap: dedupe these by an EXACT match on the raw sender id,
-  // deliberately NOT routed through normalizePhone/phonesMatch's
-  // digit-suffix matching — that could false-positive-collide two
-  // different BSUID-identified customers whose embedded digits happen
-  // to share a last-8-digit run. This only stops the duplicate-contact
-  // pileup; outbound replies to these contacts still fail
-  // (`sanitizePhoneForMeta`/`isValidE164` in meta-send.ts reject a
-  // non-phone stored value) until the fuller BSUID redesign lands
-  // (dedicated identity column + updated outbound send paths).
-  const looksLikePhone = /^\+?\d{5,15}$/.test(rawSenderId)
+  // A real Meta phone-number identifier is always digits-only
+  // (optionally a leading '+'). Anything else — letters, a dot, etc.
+  // (a BSUID, e.g. "PE.1128521366369305") — is an opaque non-phone
+  // identifier, regardless of which digits happen to be embedded in it
+  // (confirmed against a real payload — see CLAUDE.md's "WhatsApp
+  // contact identity" section). Computed once: used both to decide
+  // whether it's safe to refresh `phone` on a username-matched contact
+  // below, and for the phone/raw-id fallback dedup further down.
+  const looksLikePhone = looksLikePhoneNumber(rawSenderId)
+
+  // Meta's "WhatsApp usernames" rollout: the BSUID (`rawSenderId`) is a
+  // routing token that can rotate — deduping purely on it means the
+  // same real customer resurfaces as a "new" contact once it changes.
+  // `waUsername` (the customer's public @handle) is the durable signal
+  // instead, so it's tried FIRST — independent of whether THIS delivery
+  // also carries a real phone number. This is what lets:
+  //   (a) a hidden-number customer's contact survive their token
+  //       rotating (matched here; `wa_user_id` refreshed below), and
+  //   (b) staff manually link a known username onto an existing
+  //       phone-having contact (via the contact edit form) so a later
+  //       hidden-number message from that person resolves to THAT
+  //       contact instead of spawning a separate one.
+  if (waUsername) {
+    const { data: byUsername } = await db
+      .from('contacts')
+      .select('*')
+      .eq('account_id', accountId)
+      .eq('wa_username_normalized', waUsername.toLowerCase())
+      .maybeSingle()
+    if (byUsername) {
+      const update: Record<string, unknown> = {}
+      if (name && name !== byUsername.name) update.name = name
+      if (waUserId && waUserId !== byUsername.wa_user_id) {
+        update.wa_user_id = waUserId
+      }
+      // A real phone showed up on this delivery (first time it's
+      // known, or the customer changed numbers) — keep it current.
+      if (looksLikePhone && phone && phone !== byUsername.phone) {
+        update.phone = phone
+      }
+      if (Object.keys(update).length > 0) {
+        update.updated_at = new Date().toISOString()
+        const { error: updateErr } = await db
+          .from('contacts')
+          .update(update)
+          .eq('id', byUsername.id)
+        if (updateErr) {
+          // Was previously silent — a failed write here (e.g. a stray
+          // unique-constraint conflict) left wa_user_id/wa_username
+          // stuck null indefinitely with nothing in the logs to explain
+          // it, which is exactly what made a real instance of this bug
+          // impossible to diagnose from the app alone.
+          console.error(
+            '[webhook] contact update failed (username match):',
+            byUsername.id,
+            updateErr.message
+          )
+        }
+      }
+      return { contact: { ...byUsername, ...update }, wasCreated: false }
+    }
+  }
+
   const usingFallbackId = !looksLikePhone && !!rawSenderId
   const lookupKey = usingFallbackId ? rawSenderId : phone
 
-  // Find an existing contact for this account. The shared helper
+  // No username match (or none supplied) — fall back to the phone/raw-
+  // id logic. This also covers contacts the pre-username-column
+  // stopgap already created. Find an existing contact for this
+  // account. The shared helper
   // pre-filters in SQL by the last-8-digit suffix (so we don't pull
   // every contact on every inbound message) then applies the strict
   // `phonesMatch` in JS on the small candidate set. The same helper
@@ -1212,20 +1268,49 @@ async function findOrCreateContact(
     : await findExistingContact(db, accountId, lookupKey)
 
   if (existingContact) {
-    // Update name if it changed
-    if (name && name !== existingContact.name) {
-      await db
-        .from('contacts')
-        .update({ name, updated_at: new Date().toISOString() })
-        .eq('id', existingContact.id)
+    const update: Record<string, unknown> = {}
+    if (name && name !== existingContact.name) update.name = name
+    // Opportunistic capture: Meta included a username on this delivery
+    // that the existing row doesn't have recorded yet — save it now,
+    // for free, so a future hidden-number message from the same person
+    // already resolves via the username branch above instead of
+    // needing a staff member to link it manually.
+    if (waUsername && waUsername !== existingContact.wa_username) {
+      update.wa_username = waUsername
     }
-    return { contact: existingContact, wasCreated: false }
+    if (waUserId && waUserId !== existingContact.wa_user_id) {
+      update.wa_user_id = waUserId
+    }
+    if (Object.keys(update).length > 0) {
+      update.updated_at = new Date().toISOString()
+      const { error: updateErr } = await db
+        .from('contacts')
+        .update(update)
+        .eq('id', existingContact.id)
+      if (updateErr) {
+        // Same rationale as the username-match branch above — this
+        // write silently failing is what let wa_user_id stay null
+        // forever with no trace of why.
+        console.error(
+          '[webhook] contact update failed (phone/fallback match):',
+          existingContact.id,
+          updateErr.message
+        )
+      }
+    }
+    return {
+      contact: Object.keys(update).length > 0 ? { ...existingContact, ...update } : existingContact,
+      wasCreated: false,
+    }
   }
 
   // Create new contact. account_id is the tenancy column;
   // user_id is the NOT NULL FK audit column (no inbound message
   // has a single "user who created" it — we attribute to the
-  // WhatsApp config owner as a stable default).
+  // WhatsApp config owner as a stable default). `phone` is NOT NULL,
+  // so a hidden-number contact still gets the BSUID stored there as a
+  // placeholder (`lookupKey`) — the UI is expected to detect that
+  // shape and display `wa_username` instead of the raw token.
   const { data: newContact, error: createError } = await db
     .from('contacts')
     .insert({
@@ -1233,26 +1318,38 @@ async function findOrCreateContact(
       user_id: configOwnerUserId,
       phone: lookupKey,
       name: name || lookupKey,
+      wa_username: waUsername,
+      wa_user_id: waUserId,
     })
     .select()
     .single()
 
   if (createError) {
     // Lost a race: a concurrent inbound delivery (or another path)
-    // created this contact between our lookup and insert, and the
-    // unique index (migration 022) rejected the duplicate. Re-resolve
-    // the existing row instead of dropping the message.
+    // created this contact between our lookup and insert, and a
+    // unique index — phone_normalized (022) or wa_username (040) —
+    // rejected the duplicate. Re-resolve the winning row instead of
+    // dropping the message, preferring the same signal we raced on.
     if (isUniqueViolation(createError)) {
-      const raced = usingFallbackId
+      const raced = waUsername
         ? (
             await db
               .from('contacts')
               .select('*')
               .eq('account_id', accountId)
-              .eq('phone', lookupKey)
+              .eq('wa_username_normalized', waUsername.toLowerCase())
               .maybeSingle()
           ).data
-        : await findExistingContact(db, accountId, lookupKey)
+        : usingFallbackId
+          ? (
+              await db
+                .from('contacts')
+                .select('*')
+                .eq('account_id', accountId)
+                .eq('phone', lookupKey)
+                .maybeSingle()
+            ).data
+          : await findExistingContact(db, accountId, lookupKey)
       if (raced) return { contact: raced, wasCreated: false }
     }
     console.error('Error creating contact:', createError)
