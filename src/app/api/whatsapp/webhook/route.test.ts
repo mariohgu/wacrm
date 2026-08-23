@@ -29,6 +29,11 @@ const h = vi.hoisted(() => ({
     }[],
     /** Error the next storage upload resolves with, if any. */
     storageUploadError: null as { message: string } | null,
+    /** In-memory `contacts` table, used only by the BSUID fallback-id
+     *  path (`findOrCreateContact`'s direct query, bypassing the mocked
+     *  `findExistingContact`). Persists across runWebhook() calls within
+     *  one test so a second message can prove it reused the row. */
+    contactsTable: [] as { id: string; phone: string; name: string }[],
   },
 }))
 
@@ -135,6 +140,39 @@ vi.mock('@supabase/supabase-js', () => ({
                   }),
               }
             },
+          }
+        case 'contacts':
+          // Only reached by findOrCreateContact's fallback-id branch
+          // (usingFallbackId) — the normal phone path goes through the
+          // mocked findExistingContact below instead.
+          return {
+            select: () => ({
+              eq: () => ({
+                eq: (_col: string, phoneVal: string) => ({
+                  maybeSingle: () =>
+                    Promise.resolve({
+                      data:
+                        h.state.contactsTable.find((c) => c.phone === phoneVal) ??
+                        null,
+                      error: null,
+                    }),
+                }),
+              }),
+            }),
+            insert: (row: Record<string, unknown>) => ({
+              select: () => ({
+                single: () => {
+                  const newRow = {
+                    id: `contact-fallback-${h.state.contactsTable.length + 1}`,
+                    phone: row.phone as string,
+                    name: row.name as string,
+                  }
+                  h.state.contactsTable.push(newRow)
+                  return Promise.resolve({ data: newRow, error: null })
+                },
+              }),
+            }),
+            update: () => ({ eq: () => Promise.resolve({ error: null }) }),
           }
         default:
           throw new Error(`unexpected table: ${table}`)
@@ -260,6 +298,7 @@ beforeEach(() => {
   h.state.mirrorInboundMedia = true
   h.state.storageUploads = []
   h.state.storageUploadError = null
+  h.state.contactsTable = []
   mockGetMediaUrl.mockResolvedValue({
     url: 'https://lookaside.fbsbx.com/whatsapp/abc',
     mimeType: 'image/jpeg',
@@ -524,6 +563,37 @@ describe('inbound webhook: inbound media is mirrored (#466)', () => {
     expect(mockGetMediaUrl).not.toHaveBeenCalled()
     expect(h.state.storageUploads).toHaveLength(0)
     expect(h.state.upsertCalls[0].row).toMatchObject({ media_type: null })
+  })
+})
+
+describe('inbound webhook: WhatsApp usernames (BSUID) fallback identity', () => {
+  // Meta's "WhatsApp usernames" rollout: when a customer hides their
+  // phone number, `from` carries a non-numeric Business-Scoped User ID
+  // instead of digits (e.g. "BR.1A2B3C4D..."). normalizePhone() reduces
+  // that to '', so findOrCreateContact must fall back to an exact match
+  // on the raw id instead of creating a new contact on every message.
+  const BSUID_MESSAGE = {
+    id: 'wamid.BSUID1',
+    from: 'BR.1A2B3C4D5E6F7G8H9I0J',
+    timestamp: '1700000000',
+    type: 'text',
+    text: { body: 'hello from a hidden number' },
+  }
+
+  it('creates exactly one contact, keyed on the raw sender id', async () => {
+    await runWebhook(BSUID_MESSAGE)
+
+    expect(h.state.contactsTable).toHaveLength(1)
+    expect(h.state.contactsTable[0].phone).toBe('BR.1A2B3C4D5E6F7G8H9I0J')
+  })
+
+  it('reuses the same contact for a second message from the same non-phone id', async () => {
+    await runWebhook({ ...BSUID_MESSAGE, id: 'wamid.BSUID1' })
+    await runWebhook({ ...BSUID_MESSAGE, id: 'wamid.BSUID2' })
+
+    // The old behavior created a brand-new contact per message here —
+    // this is the regression the fallback-id lookup guards against.
+    expect(h.state.contactsTable).toHaveLength(1)
   })
 })
 

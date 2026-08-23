@@ -201,6 +201,14 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: 'Invalid JSON' }, { status: 400 })
   }
 
+  // TEMPORARY DEBUG — 2026-08-22, remove once a BSUID/username payload
+  // has been captured (see the "WhatsApp contact identity" section in
+  // CLAUDE.md). Only logs delivery types that carry an inbound message
+  // (skips pure status-update pings) to keep the noise down.
+  if (rawBody.includes('"messages"')) {
+    console.log('[webhook DEBUG] raw inbound payload:', rawBody)
+  }
+
   // Process AFTER the response so we ack Meta within their ~20s timeout
   // (a slow ack triggers Meta retries + duplicate inserts), while still
   // guaranteeing the work runs to completion.
@@ -596,7 +604,8 @@ async function processMessage(
     accountId,
     configOwnerUserId,
     senderPhone,
-    contactName
+    contactName,
+    message.from
   )
   if (!contactOutcome) return
   const contactRecord = contactOutcome.contact
@@ -1116,24 +1125,67 @@ async function findOrCreateContact(
   accountId: string,
   configOwnerUserId: string,
   phone: string,
-  name: string
+  name: string,
+  // Untouched `message.from` — kept alongside the normalized `phone` as
+  // a fallback identity key. See the `usingFallbackId` branch below.
+  rawSenderId: string,
 ): Promise<ContactOutcome | null> {
-  // Find an existing contact for this account by phone. The shared
-  // helper pre-filters in SQL by the last-8-digit suffix (so we don't
-  // pull every contact on every inbound message) then applies the
-  // strict `phonesMatch` in JS on the small candidate set. The same
-  // helper backs the manual contact form and CSV import, so all three
-  // paths agree on what "same number" means (issue #212).
-  const existingContact = await findExistingContact(
-    supabaseAdmin(),
-    accountId,
-    phone,
-  )
+  const db = supabaseAdmin()
+
+  // Meta's "WhatsApp usernames" rollout (BSUID, live since 2026-03-31):
+  // when a customer hides their phone number, `message.from` is a
+  // non-numeric Business-Scoped User ID (e.g. "BR.1A2B3C4D...") instead
+  // of digits. Detecting this from `normalizePhone(from) === ''` is NOT
+  // reliable — a BSUID can happen to contain enough stray digits to
+  // normalize into a plausible-looking (but meaningless, and possibly
+  // colliding) phone-shaped string. Instead, check the RAW id itself:
+  // a real Meta phone-number `from` is always digits-only (optionally
+  // with a leading '+'). Anything else — letters, dots, etc. — is
+  // treated as an opaque non-phone identifier, regardless of which
+  // digits happen to be embedded in it.
+  //
+  // Without this, the digit-suffix dedup in `findExistingContact` bails
+  // immediately on an empty/garbled normalized phone (and the DB's
+  // unique index on migration 022 explicitly excludes empty
+  // `phone_normalized`), so every inbound message from such a customer
+  // used to create a brand-new contact instead of finding the existing
+  // one — see the CLAUDE.md change log entry for the full symptom.
+  //
+  // Stopgap: dedupe these by an EXACT match on the raw sender id,
+  // deliberately NOT routed through normalizePhone/phonesMatch's
+  // digit-suffix matching — that could false-positive-collide two
+  // different BSUID-identified customers whose embedded digits happen
+  // to share a last-8-digit run. This only stops the duplicate-contact
+  // pileup; outbound replies to these contacts still fail
+  // (`sanitizePhoneForMeta`/`isValidE164` in meta-send.ts reject a
+  // non-phone stored value) until the fuller BSUID redesign lands
+  // (dedicated identity column + updated outbound send paths).
+  const looksLikePhone = /^\+?\d{5,15}$/.test(rawSenderId)
+  const usingFallbackId = !looksLikePhone && !!rawSenderId
+  const lookupKey = usingFallbackId ? rawSenderId : phone
+
+  // Find an existing contact for this account. The shared helper
+  // pre-filters in SQL by the last-8-digit suffix (so we don't pull
+  // every contact on every inbound message) then applies the strict
+  // `phonesMatch` in JS on the small candidate set. The same helper
+  // backs the manual contact form and CSV import, so all three paths
+  // agree on what "same number" means (issue #212) — bypassed above
+  // only for the non-phone fallback case.
+  const existingContact = usingFallbackId
+    ? (
+        await db
+          .from('contacts')
+          .select('*')
+          .eq('account_id', accountId)
+          .eq('phone', lookupKey)
+          .maybeSingle()
+      ).data
+    : await findExistingContact(db, accountId, lookupKey)
 
   if (existingContact) {
     // Update name if it changed
     if (name && name !== existingContact.name) {
-      await supabaseAdmin()
+      await db
         .from('contacts')
         .update({ name, updated_at: new Date().toISOString() })
         .eq('id', existingContact.id)
@@ -1145,13 +1197,13 @@ async function findOrCreateContact(
   // user_id is the NOT NULL FK audit column (no inbound message
   // has a single "user who created" it — we attribute to the
   // WhatsApp config owner as a stable default).
-  const { data: newContact, error: createError } = await supabaseAdmin()
+  const { data: newContact, error: createError } = await db
     .from('contacts')
     .insert({
       account_id: accountId,
       user_id: configOwnerUserId,
-      phone,
-      name: name || phone,
+      phone: lookupKey,
+      name: name || lookupKey,
     })
     .select()
     .single()
@@ -1162,7 +1214,16 @@ async function findOrCreateContact(
     // unique index (migration 022) rejected the duplicate. Re-resolve
     // the existing row instead of dropping the message.
     if (isUniqueViolation(createError)) {
-      const raced = await findExistingContact(supabaseAdmin(), accountId, phone)
+      const raced = usingFallbackId
+        ? (
+            await db
+              .from('contacts')
+              .select('*')
+              .eq('account_id', accountId)
+              .eq('phone', lookupKey)
+              .maybeSingle()
+          ).data
+        : await findExistingContact(db, accountId, lookupKey)
       if (raced) return { contact: raced, wasCreated: false }
     }
     console.error('Error creating contact:', createError)

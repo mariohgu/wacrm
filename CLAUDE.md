@@ -84,6 +84,17 @@ providers can mostly clone `providers/openai.ts`), wire the `case` in
 UI label/placeholder/`<SelectItem>` in `ai-config.tsx`, and widen both
 DB CHECK constraints in a new migration.
 
+**Auto-reply handoff can carry a customer-facing message.** The model
+may pair the `[[HANDOFF]]` sentinel with a short message (the
+`buildSystemPrompt` scaffold, `defaults.ts`, explicitly allows this —
+"You may put a short, warm sentence... before the sentinel"). When it
+does, `dispatchInboundToAiReply` (`auto-reply.ts`) sends that message to
+the customer — gated by the same atomic `claim_ai_reply_slot` RPC as a
+normal reply, wrapped in its own try/catch so a send failure never skips
+the handoff bookkeeping (`ai_autoreply_disabled`, `ai_handoff_summary`)
+below it. Before this, the handoff branch discarded any model text
+outright and the customer got silence.
+
 ## Automations builder (`src/components/automations/automation-builder.tsx`)
 
 One 1700+ line file, no external flow library (that's the *separate*
@@ -186,6 +197,38 @@ only ever POSTs a pending booking to it.
   in this repo are a single hardcoded English-content module (no
   per-locale template variants), matching the existing
   `welcome_menu`/`faq_bot`/`lead_capture` convention.
+
+## WhatsApp contact identity (phone vs. BSUID)
+
+Meta's "WhatsApp usernames" rollout (live since 2026-03-31, mandatory by
+June 2026) lets a customer hide their phone number from a business. When
+they do, the webhook's `messages[].from` carries a **Business-Scoped
+User ID (BSUID)** instead of digits — format `CC.alphanumeric`, e.g.
+`BR.1A2B3C4D5E6F7G8H9I0J...` — or may omit `from` entirely in favor of a
+new top-level `user_id` field. This repo has not yet confirmed the exact
+payload shape Meta sends for an affected account (see the change log
+entry below) — treat any code here that assumes `from` is always a
+plain phone number as unverified against the real BSUID case.
+
+`findOrCreateContact` (`src/app/api/whatsapp/webhook/route.ts`) detects
+a non-phone `from` by checking the **raw** string against
+`/^\+?\d{5,15}$/` — deliberately not by checking whether
+`normalizePhone(from)` came out empty, since a BSUID can contain enough
+stray digits to normalize into a plausible-looking (and possibly
+colliding) fake phone number. When it doesn't look like a phone, the
+raw id is used as an exact-match dedup/storage key instead of going
+through `findExistingContact`'s digit-suffix `phonesMatch` logic. This
+is a **stopgap** for the duplicate-contact symptom only — outbound
+sends to such a contact still fail (`sanitizePhoneForMeta`/
+`isValidE164` in `src/lib/flows/meta-send.ts` /
+`src/lib/automations/meta-send.ts` reject a non-phone stored value).
+The real fix needs a dedicated identity column (`contacts.phone` is
+`NOT NULL` and drives a generated `phone_normalized` column + a
+per-account unique index, migration 022 — a BSUID doesn't fit that
+model), an updated migration, and BSUID-aware outbound sending across
+every `meta-send.ts` call site plus broadcasts. Not done yet — needs a
+real webhook payload from an affected account to implement against
+ground truth rather than guessing field names.
 
 # Change log (Claude Code sessions)
 
@@ -416,3 +459,111 @@ regression from this change.
 > real WhatsApp number this session — the user still needs to supply
 > the actual token, base URL, and placeholder ids, and confirm a live
 > booking round-trip.
+
+## 2026-08-22 — Auto-reply handoff now sends the model's farewell message
+
+Reported: MlennyBot (this fork's AI assistant persona) is designed to
+say something graceful before handing off to a human ("Lamentamos lo
+ocurrido... una integrante de nuestro equipo continuará..."), but the
+customer was getting silence instead. Traced to
+`dispatchInboundToAiReply` (`src/lib/ai/auto-reply.ts`): the
+`if (handoff || !text) { ...; return }` branch discarded `text`
+unconditionally before returning — whatever the model wrote alongside
+the `[[HANDOFF]]` sentinel never reached `engineSendText`. Compounding
+it, the auto-reply scaffold (`buildSystemPrompt`, `src/lib/ai/
+defaults.ts`) told the model to reply with the sentinel "and nothing
+else," so even fixing the send path alone wouldn't have produced a
+paired message in practice.
+
+Touched:
+
+- [src/lib/ai/auto-reply.ts](src/lib/ai/auto-reply.ts) — when `text` is
+  non-empty on the handoff branch, sends it before disabling auto-reply,
+  gated by the same `claim_ai_reply_slot` atomic-cap RPC a normal reply
+  uses, wrapped in its own try/catch so a send failure can't skip the
+  handoff bookkeeping (confirmed via a new test: farewell-send-throws
+  still marks `ai_autoreply_disabled`).
+- [src/lib/ai/defaults.ts](src/lib/ai/defaults.ts) — scaffold instruction
+  now allows (doesn't require) a short customer-facing sentence before
+  the sentinel.
+- [src/lib/ai/auto-reply.test.ts](src/lib/ai/auto-reply.test.ts) — 3 new
+  cases: paired message sent + slot claimed, message dropped silently
+  when the slot-claim race is lost, handoff bookkeeping survives a send
+  throw.
+
+Also delivered as content (not code, per the user's own request):
+an adapted Spanish system-prompt for `ai_configs.system_prompt` — trimmed
+of instructions the scaffold already covers (language matching, output
+format, prompt-injection defense, the `[[HANDOFF]]` protocol itself) so
+it doesn't duplicate or fight the built-in scaffold — plus guidance on
+structuring the Knowledge Base as one document per service/category
+rather than one large catalog, since retrieval pulls the top-5 chunks
+and unrelated services in the same chunk compete for that budget.
+
+Verified: `npx tsc --noEmit`, `npx eslint` (0 errors), full `npx vitest
+run` — only the same pre-existing, unrelated `date-utils.test.ts`
+failures. Decision explicitly deferred, per the user's own MlennyBot
+prompt (which never lets the bot confirm a booking itself): no AI
+tool-calling / function-calling capability was added. The AI still only
+drafts text; the `create_salon_appointment` Flow node (see above) or a
+human remains the only path that actually books.
+
+## 2026-08-22 — WhatsApp contact-duplication stopgap (BSUID / usernames)
+
+Reported: every inbound message from certain customers was creating a
+**new** contact instead of reusing the existing one — inbox filled with
+one-message "contacts" all showing the same (garbled) name. Root-caused
+via `git log`-free code inspection plus a live Meta Cloud API doc check
+(see **WhatsApp contact identity** section above for the durable
+explanation): Meta's "WhatsApp usernames" feature can put a
+non-phone Business-Scoped User ID in `messages[].from`; this repo's
+`normalizePhone()` reduces that to `''`, `findExistingContact` bails
+immediately on an empty normalized phone, and the per-account unique
+index (migration 022) explicitly excludes empty `phone_normalized` — so
+nothing anywhere stops a fresh insert every time. Confirmed by a second
+symptom in the same investigation: `[ai auto-reply] dispatch failed:
+Error: contact not found for this account`, traced to `engineSendText`
+(`src/lib/flows/meta-send.ts:76-78`) treating a found-but-phoneless
+contact row as "not found."
+
+Shipped a **stopgap only** — stops the duplicate-contact pileup, does
+**not** fix outbound sending to these contacts (still fails, now with a
+clearer "contact phone invalid" error instead of "not found"). The full
+fix (dedicated BSUID identity column + migration + updated outbound
+send across every `meta-send.ts` call site) needs a real webhook payload
+from an affected account, not yet obtained — user was asked twice; the
+server-log excerpts shared didn't include the raw webhook JSON, only
+downstream error traces (which were enough to confirm the root cause,
+just not the exact BSUID field shape to build the full fix against).
+
+Touched:
+
+- [src/app/api/whatsapp/webhook/route.ts](src/app/api/whatsapp/webhook/route.ts)
+  — `findOrCreateContact` gained a 5th arg (`rawSenderId`, the untouched
+  `message.from`). Detects "this isn't a phone number" by testing the
+  **raw** string against `/^\+?\d{5,15}$/` — NOT by checking whether
+  `normalizePhone()` came out empty, because a first attempt at this fix
+  used that check and its own test caught the bug: a BSUID can contain
+  enough stray digits to normalize into a plausible-looking, wrong
+  "phone." When non-phone, dedupes/creates by an exact string match on
+  the raw id (bypassing `findExistingContact`'s digit-suffix
+  `phonesMatch`, which could false-positive-collide two different BSUID
+  customers).
+- [src/app/api/whatsapp/webhook/route.test.ts](src/app/api/whatsapp/webhook/route.test.ts)
+  — new `contacts` table case in the Supabase mock (only exercised by
+  the fallback path) + 2 new tests proving one contact gets created and
+  reused across two messages from the same non-phone `from`.
+
+Verified: `npx tsc --noEmit`, `npx eslint` (0 errors, 1 pre-existing
+unrelated warning), full `npx vitest run` — only the same pre-existing
+`date-utils.test.ts` failures remain.
+
+> **Follow-up needed, not done this session:** get a real raw webhook
+> payload from an affected message (Meta App Dashboard → Webhooks →
+> recent deliveries, or a temporary raw-body `console.log` in the POST
+> handler) to (a) confirm the exact BSUID field/shape this account
+> actually receives, and (b) design the real fix — a dedicated identity
+> column, an updated migration, and BSUID-aware outbound sending in
+> `src/lib/flows/meta-send.ts`, `src/lib/automations/meta-send.ts`, and
+> broadcast sending. Until then, replying to a hidden-number customer
+> from wacrm does not work.
