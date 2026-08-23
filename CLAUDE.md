@@ -61,6 +61,21 @@ dependency — every provider is a plain `fetch` adapter under
   `ai_configs` (AES-256-GCM at rest via `src/lib/whatsapp/encryption.ts`)
 - `generate.ts` — `generateReply` dispatches to the right provider
   adapter by `config.provider`, then strips the `[[HANDOFF]]` sentinel
+- `context.ts` — `buildConversationContext` (last N text messages →
+  `ChatMessage[]`) and `buildCustomerContext` (CRM lookup: name, phone,
+  whether the customer has written before). The latter deliberately
+  never surfaces `contacts.phone` when it's a WhatsApp-usernames BSUID
+  placeholder rather than a real number (`looksLikePhoneNumber` gate) —
+  see the "WhatsApp contact identity" section. Both feed
+  `defaults.ts`'s `buildSystemPrompt`, which — when given a
+  `customer` — adds a "Customer record" paragraph telling the model
+  not to ask again for a name/number already on file, and whether this
+  is a returning customer ("more than one customer message in this
+  conversation," since this CRM reuses one conversation per contact
+  rather than starting a fresh thread per session). Wired into both
+  `auto-reply.ts` (the bot) and `api/ai/draft/route.ts` (the inbox
+  "draft" button) — NOT into `api/ai/playground/route.ts`, which is a
+  stateless test chat with no real conversation/contact to look up.
 - `providers/{openai,anthropic,openrouter}.ts` — one adapter per
   provider; `providers/shared.ts` has the cross-provider helpers
   (usage normalization, HTTP/network error mapping, turn merging)
@@ -920,3 +935,96 @@ verified against a live Meta send this session (no WhatsApp credentials
 available) — manual recommended: reply from the Inbox to a contact whose
 `phone` holds a BSUID placeholder (e.g. "thali.vd_") and confirm the
 message delivers instead of showing "Invalid phone number format".
+
+**Post-deploy diagnosis, same day.** The user confirmed the outbound fix
+worked in one case but then hit a second, different failure for the
+same contact: `Contact has no phone number or WhatsApp user id on
+file` — `wa_user_id` was still `NULL` on that row despite ongoing
+inbound activity. Investigation ruled out a unique-constraint collision
+(no other contact had claimed that `wa_username`) and confirmed via
+`git log`/`git show --stat` that all of this session's code — including
+migration 040/`039b_wa_username_identity.sql`'s webhook logic — was
+already committed to `origin/main` and successfully deployed on
+Vercel, so it wasn't a stale-deployment issue either. Root cause
+undetermined with the evidence available (most likely this one contact
+row simply predated the capture logic and never got a qualifying
+inbound message after deploy) — but along the way, found and fixed a
+real, previously-invisible gap: **`findOrCreateContact`'s two
+`contacts.update()` calls (username-match and phone/fallback branches)
+never checked for an error.** Any write failure there — a constraint
+conflict, anything — was completely silent, which is exactly what would
+make a real instance of this class of bug undiagnosable. Both now log
+`[webhook] contact update failed: <id> <message>` on failure.
+Unblocked the immediate case with a one-off manual SQL backfill
+(`wa_user_id = phone` for that contact) rather than a code change,
+since the code's capture logic is already correct going forward.
+
+Also flagged and rejected: the user found a third-party "BSUID
+integration guide" suggesting a `business_scoped_user_id` webhook field
+and treating `wa_id`/phone as always-present. Both contradict this
+project's own two independent confirmations (a real captured payload
+from an affected account, and Meta's official docs via WebFetch this
+session) that the real fields are `contacts[].user_id` /
+`messages[].from_user_id`, and that `wa_id`/`message.from` are
+**absent entirely** for a hidden-number sender. Not applied.
+
+## 2026-08-23 — AI assistant now sees the CRM's name/phone on file
+
+User asked whether the AI agent could check the CRM before replying, so
+it stops asking a returning customer for their name/phone when the
+contact record already has them saved.
+
+Previously, `buildConversationContext` (both the auto-reply bot and the
+inbox "draft" button) fed the model nothing but the raw WhatsApp
+message transcript plus knowledge-base excerpts — no query against
+`contacts` at all, so the model had zero way to know a customer's name,
+phone, or whether they'd written in before, unless that information
+happened to appear literally inside the chat text.
+
+Touched:
+
+- [src/lib/ai/context.ts](src/lib/ai/context.ts) — new
+  `buildCustomerContext(db, conversationId, contactId)`: looks up
+  `contacts.name`/`phone` plus a `isReturningCustomer` flag (more than
+  one customer-sent message already in this conversation — this CRM
+  reuses/reopens one conversation per contact rather than starting a
+  fresh thread per session, the same signal the webhook already uses
+  for the `first_inbound_message` automation trigger). Deliberately
+  never returns a WhatsApp-usernames BSUID placeholder as `phone` —
+  gated on the existing `looksLikePhoneNumber` helper — since handing
+  the model a string like `"PE.1128521366369305"` and calling it "the
+  customer's phone number" would be actively wrong, not just unhelpful.
+- [src/lib/ai/defaults.ts](src/lib/ai/defaults.ts) — `buildSystemPrompt`
+  gained an optional `customer: CustomerContext | null` param. When any
+  of its fields are truthy, adds a "Customer record" paragraph — e.g.
+  "this is a returning customer... Already on file — do not ask the
+  customer for this again: name: X, phone number: Y." Omitted entirely
+  when there's nothing to report (a fresh contact captured mid-session,
+  no name/phone yet, not returning), rather than printing an
+  empty-handed sentence every time.
+- [src/lib/ai/auto-reply.ts](src/lib/ai/auto-reply.ts),
+  [src/app/api/ai/draft/route.ts](src/app/api/ai/draft/route.ts) — both
+  call `buildCustomerContext` right after `buildConversationContext`
+  and thread it into `buildSystemPrompt`. The draft route's
+  `conversations` select widened from `id` to `id, contact_id` to have
+  a contact to look up (previously never fetched one).
+  `api/ai/playground/route.ts` deliberately untouched — it's a
+  stateless test chat with no real conversation/contact behind it.
+- Tests: `context.test.ts` (new `buildCustomerContext` cases, including
+  the BSUID-placeholder-never-becomes-a-phone-number case),
+  `defaults.test.ts` (new file — the customer-record paragraph's
+  presence/omission rules), `auto-reply.test.ts` (mocked
+  `buildCustomerContext`, since the module mock previously only
+  exported `buildConversationContext` and would otherwise have made
+  every existing test call `undefined()`; one new test asserting the
+  system prompt carries the name/phone/returning-customer info through).
+
+No DB migration needed — reads existing `contacts` columns only.
+Verified: `npx tsc --noEmit` clean; `npx eslint` on every touched file
+(0 errors/warnings); `npx vitest run` on the touched/new files (29
+passing); full `npx vitest run` (875/877 — only the same pre-existing,
+unrelated `date-utils.test.ts` `mondayIndex` timezone flakiness). Not
+verified against a live LLM call this session (no provider key
+available) — manual recommended: with an AI config active, message in
+as a contact who already has a name + real phone saved, and confirm the
+draft/auto-reply doesn't ask for information already on file.

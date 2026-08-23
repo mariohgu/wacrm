@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import type { SupabaseClient } from '@supabase/supabase-js'
-import { buildConversationContext } from './context'
+import { buildConversationContext, buildCustomerContext } from './context'
 
 /** Minimal fake matching the query chain in buildConversationContext:
  *  from().select().eq().eq().order().limit() → { data, error }. */
@@ -49,5 +49,85 @@ describe('buildConversationContext', () => {
       'conv-1',
     )
     expect(out).toEqual([{ role: 'user', content: 'real' }])
+  })
+})
+
+/** Fake matching buildCustomerContext's two parallel queries: a
+ *  contacts().select().eq().maybeSingle() lookup, and a messages()
+ *  count query that resolves off the last chained .eq(). */
+function fakeCustomerDb(opts: {
+  contact: { name: string | null; phone: string | null } | null
+  customerMessageCount: number
+}): SupabaseClient {
+  return {
+    from(table: string) {
+      if (table === 'contacts') {
+        const chain = {
+          select: () => chain,
+          eq: () => chain,
+          maybeSingle: () => Promise.resolve({ data: opts.contact, error: null }),
+        }
+        return chain
+      }
+      const chain = {
+        select: () => chain,
+        eq: () => chain,
+        then: (resolve: (r: { count: number; error: null }) => unknown) =>
+          resolve({ count: opts.customerMessageCount, error: null }),
+      }
+      return chain
+    },
+  } as unknown as SupabaseClient
+}
+
+describe('buildCustomerContext', () => {
+  it('surfaces a real phone number and name as-is', async () => {
+    const out = await buildCustomerContext(
+      fakeCustomerDb({
+        contact: { name: 'Thalía', phone: '+51912147223' },
+        customerMessageCount: 1,
+      }),
+      'conv-1',
+      'contact-1',
+    )
+    expect(out).toEqual({
+      name: 'Thalía',
+      phone: '+51912147223',
+      isReturningCustomer: false,
+    })
+  })
+
+  it('flags a returning customer when more than one customer message exists', async () => {
+    const out = await buildCustomerContext(
+      fakeCustomerDb({
+        contact: { name: 'Thalía', phone: '+51912147223' },
+        customerMessageCount: 4,
+      }),
+      'conv-1',
+      'contact-1',
+    )
+    expect(out.isReturningCustomer).toBe(true)
+  })
+
+  it('never surfaces a WhatsApp-usernames BSUID placeholder as a phone number', async () => {
+    const out = await buildCustomerContext(
+      fakeCustomerDb({
+        contact: { name: 'thali.vd_', phone: 'PE.1128521366369305' },
+        customerMessageCount: 2,
+      }),
+      'conv-1',
+      'contact-1',
+    )
+    expect(out.name).toBe('thali.vd_')
+    expect(out.phone).toBeNull()
+  })
+
+  it('returns nulls when the contact row is missing', async () => {
+    const out = await buildCustomerContext(
+      fakeCustomerDb({ contact: null, customerMessageCount: 0 }),
+      'conv-1',
+      'contact-1',
+    )
+    expect(out).toEqual({ name: null, phone: null, isReturningCustomer: false })
   })
 })

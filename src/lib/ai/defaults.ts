@@ -1,4 +1,5 @@
 import type { AiProvider } from './types'
+import type { CustomerContext } from './context'
 
 // ============================================================
 // Tunables + prompt scaffold for the AI reply assistant.
@@ -55,8 +56,11 @@ export function buildSystemPrompt(args: {
   mode: 'draft' | 'auto_reply'
   /** Knowledge-base excerpts retrieved for the current question. */
   knowledge?: string[]
+  /** CRM record for the customer in this conversation, when known —
+   *  lets the model skip asking for a name/number already on file. */
+  customer?: CustomerContext | null
 }): string {
-  const { userPrompt, mode, knowledge } = args
+  const { userPrompt, mode, knowledge, customer } = args
   const parts: string[] = [
     'You are a customer-messaging assistant for a business that uses a WhatsApp CRM. ' +
       'You are shown the recent WhatsApp conversation between the business (assistant) and a customer (user). ' +
@@ -70,6 +74,23 @@ export function buildSystemPrompt(args: {
   if (mode === 'auto_reply') {
     parts.push(
       `You are replying automatically with no human in the loop. If you cannot confidently and safely help — the customer explicitly asks for a human, is upset or complaining, or the request needs information you do not have — end your reply with ${HANDOFF_SENTINEL} so a human agent takes over. You may put a short, warm sentence to the customer before the sentinel (e.g. letting them know someone from the team will continue); if you have nothing useful to add, output only ${HANDOFF_SENTINEL}. Never write anything after the sentinel. Prefer handing off over guessing.`,
+    )
+  }
+
+  if (customer && (customer.name || customer.phone || customer.isReturningCustomer)) {
+    const known: string[] = []
+    if (customer.name) known.push(`name: ${customer.name}`)
+    if (customer.phone) known.push(`phone number: ${customer.phone}`)
+    const knownLine =
+      known.length > 0
+        ? `Already on file — do not ask the customer for this again: ${known.join(', ')}.`
+        : "Their name and phone number aren't on file yet."
+    parts.push(
+      `Customer record from the CRM: ${
+        customer.isReturningCustomer
+          ? 'this is a returning customer, they have written before.'
+          : 'this is their first message to the business.'
+      } ${knownLine}`,
     )
   }
 

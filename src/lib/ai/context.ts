@@ -1,6 +1,7 @@
 import type { SupabaseClient } from '@supabase/supabase-js'
 import type { ChatMessage } from './types'
 import { aiContextMessageLimit } from './defaults'
+import { looksLikePhoneNumber } from '@/lib/whatsapp/phone-utils'
 
 interface DbMessage {
   sender_type: 'customer' | 'agent' | 'bot'
@@ -38,4 +39,51 @@ export async function buildConversationContext(
       role: m.sender_type === 'customer' ? 'user' : 'assistant',
       content: m.content_text!.trim(),
     }))
+}
+
+export interface CustomerContext {
+  name: string | null
+  /**
+   * Only ever a real phone number. A WhatsApp-usernames customer whose
+   * number is hidden has a BSUID routing token parked in `contacts.phone`
+   * instead (see CLAUDE.md's "WhatsApp contact identity" section) — that
+   * token is never surfaced here, since handing it to the model as "the
+   * customer's phone number" would be actively wrong.
+   */
+  phone: string | null
+  /** True when the customer has written in this thread before — this
+   *  CRM reuses/reopens one conversation per contact rather than
+   *  starting a fresh thread each session, so "more than one customer
+   *  message in this conversation" is the same signal the webhook uses
+   *  for the `first_inbound_message` automation trigger. */
+  isReturningCustomer: boolean
+}
+
+/**
+ * Look up what the CRM already knows about this contact, so the system
+ * prompt can tell the model not to ask for a name/number it already has
+ * on file. Best-effort by design (mirrors buildConversationContext's
+ * lookup pattern) — a lookup failure just means the model asks the
+ * customer directly, same as before this existed.
+ */
+export async function buildCustomerContext(
+  db: SupabaseClient,
+  conversationId: string,
+  contactId: string,
+): Promise<CustomerContext> {
+  const [{ data: contact }, { count }] = await Promise.all([
+    db.from('contacts').select('name, phone').eq('id', contactId).maybeSingle(),
+    db
+      .from('messages')
+      .select('id', { count: 'exact', head: true })
+      .eq('conversation_id', conversationId)
+      .eq('sender_type', 'customer'),
+  ])
+
+  const phone = contact?.phone
+  return {
+    name: contact?.name?.trim() || null,
+    phone: phone && looksLikePhoneNumber(phone) ? phone : null,
+    isReturningCustomer: (count ?? 0) > 1,
+  }
 }
