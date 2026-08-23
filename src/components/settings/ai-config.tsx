@@ -70,6 +70,10 @@ export function AiConfig() {
   const [embeddingsKey, setEmbeddingsKey] = useState('');
   const [embeddingsKeyEdited, setEmbeddingsKeyEdited] = useState(false);
   const [hasStoredEmbeddingsKey, setHasStoredEmbeddingsKey] = useState(false);
+  const [transcriptionKey, setTranscriptionKey] = useState('');
+  const [transcriptionKeyEdited, setTranscriptionKeyEdited] = useState(false);
+  const [hasStoredTranscriptionKey, setHasStoredTranscriptionKey] = useState(false);
+  const [transcriptionModel, setTranscriptionModel] = useState('');
   const [systemPrompt, setSystemPrompt] = useState('');
   const [isActive, setIsActive] = useState(false);
   const [autoReplyEnabled, setAutoReplyEnabled] = useState(false);
@@ -108,6 +112,10 @@ export function AiConfig() {
         setHasStoredEmbeddingsKey(Boolean(data.has_embeddings_key));
         setEmbeddingsKey(data.has_embeddings_key ? MASKED_KEY : '');
         setEmbeddingsKeyEdited(false);
+        setHasStoredTranscriptionKey(Boolean(data.has_transcription_key));
+        setTranscriptionKey(data.has_transcription_key ? MASKED_KEY : '');
+        setTranscriptionKeyEdited(false);
+        setTranscriptionModel(data.transcription_model ?? '');
       }
     } catch {
       toast.error(t('loadFailed'));
@@ -144,11 +152,16 @@ export function AiConfig() {
   const embeddingsKeyPayload = () =>
     embeddingsKeyEdited ? embeddingsKey.trim() || null : undefined;
 
+  const transcriptionKeyPayload = () =>
+    transcriptionKeyEdited ? transcriptionKey.trim() || null : undefined;
+
   const buildBody = () => ({
     provider,
     model: model.trim(),
     api_key: keyPayload(),
     embeddings_api_key: embeddingsKeyPayload(),
+    transcription_api_key: transcriptionKeyPayload(),
+    transcription_model: transcriptionModel.trim() || null,
     system_prompt: systemPrompt.trim() || null,
     is_active: isActive,
     auto_reply_enabled: autoReplyEnabled,
@@ -218,6 +231,13 @@ export function AiConfig() {
         setHasStoredKey(false);
         setApiKey('');
         setKeyEdited(false);
+        setHasStoredEmbeddingsKey(false);
+        setEmbeddingsKey('');
+        setEmbeddingsKeyEdited(false);
+        setHasStoredTranscriptionKey(false);
+        setTranscriptionKey('');
+        setTranscriptionKeyEdited(false);
+        setTranscriptionModel('');
         setIsActive(false);
         setAutoReplyEnabled(false);
         setSystemPrompt('');
@@ -379,9 +399,52 @@ export function AiConfig() {
                 autoComplete="off"
               />
               <p className="text-xs text-muted-foreground">
-                {t('embeddingsHint', {
-                  sameKeyText: provider === 'openai' ? t('sameKeyText') : '',
-                })}
+                {t('embeddingsHint')}
+              </p>
+            </div>
+
+            <div className="space-y-2">
+              <Label htmlFor="ai-transcription-key">
+                {t('transcriptionKey')}{' '}
+                <span className="font-normal text-muted-foreground">
+                  {t('optionalVoiceTranscription')}
+                </span>
+              </Label>
+              <Input
+                id="ai-transcription-key"
+                type="password"
+                value={transcriptionKey}
+                onChange={(e) => {
+                  setTranscriptionKey(e.target.value);
+                  setTranscriptionKeyEdited(true);
+                }}
+                onFocus={() => {
+                  if (!transcriptionKeyEdited && hasStoredTranscriptionKey) {
+                    setTranscriptionKey('');
+                    setTranscriptionKeyEdited(true);
+                  }
+                }}
+                placeholder="sk-... (OpenAI)"
+                disabled={disabled}
+                autoComplete="off"
+              />
+              <p className="text-xs text-muted-foreground">
+                {t('transcriptionHint')}
+              </p>
+              <Label htmlFor="ai-transcription-model">{t('transcriptionModel')}</Label>
+              <Input
+                id="ai-transcription-model"
+                value={transcriptionModel}
+                onChange={(e) => setTranscriptionModel(e.target.value)}
+                placeholder={
+                  provider === 'openrouter'
+                    ? 'openai/gpt-4o-mini-transcribe'
+                    : 'gpt-4o-mini-transcribe'
+                }
+                disabled={disabled}
+              />
+              <p className="text-xs text-muted-foreground">
+                {t('transcriptionModelHint')}
               </p>
             </div>
           </CardContent>

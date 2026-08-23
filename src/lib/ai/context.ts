@@ -11,8 +11,13 @@ interface DbMessage {
 /**
  * Fetch the last N text messages of a conversation and map them to the
  * provider-neutral chat shape. Customer messages become `user`; agent
- * and bot messages become `assistant`. Non-text messages (media,
- * templates, interactive) are excluded — they carry no text to model.
+ * and bot messages become `assistant`. Audio messages are included when
+ * they carry a transcript (`content_text` — see the webhook's audio
+ * case and `transcription.ts`); other media, templates, and interactive
+ * replies are excluded — they carry no text to model. An audio row
+ * with no transcript (transcription not configured, or it failed) is
+ * dropped by the empty-content_text filter below, same as any other
+ * row with nothing to say.
  *
  * Ordered oldest-first (chronological) so the transcript reads
  * naturally and the most recent customer message lands last.
@@ -26,7 +31,7 @@ export async function buildConversationContext(
     .from('messages')
     .select('sender_type, content_text')
     .eq('conversation_id', conversationId)
-    .eq('content_type', 'text')
+    .in('content_type', ['text', 'audio'])
     .order('created_at', { ascending: false })
     .limit(limit)
 

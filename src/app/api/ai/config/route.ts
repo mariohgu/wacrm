@@ -7,8 +7,15 @@ import {
 import { checkRateLimit, rateLimitResponse, RATE_LIMITS } from '@/lib/rate-limit'
 import { encrypt, decrypt } from '@/lib/whatsapp/encryption'
 import { validateAiCredentials } from '@/lib/ai/validate'
-import { embedTexts } from '@/lib/ai/embeddings'
+import { embedTexts, EMBEDDING_MODEL } from '@/lib/ai/embeddings'
 import { AiError, type AiProvider } from '@/lib/ai/types'
+
+// The fallback key fields (embeddings, transcription) are always
+// validated/used against OpenAI directly — that's their whole purpose
+// (an account on Anthropic, with no native path, supplies one of
+// these). An account on OpenAI/OpenRouter doesn't need either field at
+// all; see src/lib/ai/config.ts's resolveAuxiliaryEndpoint.
+const OPENAI_API_BASE = 'https://api.openai.com/v1'
 
 function bad(message: string) {
   return NextResponse.json({ error: message }, { status: 400 })
@@ -30,7 +37,7 @@ export async function GET() {
       // `api_key` is selected only to derive `has_key` — it is stripped
       // out below and never returned to the client.
       .select(
-        'provider, model, system_prompt, is_active, auto_reply_enabled, auto_reply_max_per_conversation, handoff_agent_id, api_key, embeddings_api_key',
+        'provider, model, system_prompt, is_active, auto_reply_enabled, auto_reply_max_per_conversation, handoff_agent_id, api_key, embeddings_api_key, transcription_api_key, transcription_model',
       )
       .eq('account_id', accountId)
       .maybeSingle()
@@ -46,11 +53,12 @@ export async function GET() {
     if (!data) return NextResponse.json({ configured: false })
     // The keys are selected only to derive the has_* flags; neither is
     // returned to the client.
-    const { api_key, embeddings_api_key, ...safe } = data
+    const { api_key, embeddings_api_key, transcription_api_key, ...safe } = data
     return NextResponse.json({
       configured: true,
       has_key: !!api_key,
       has_embeddings_key: !!embeddings_api_key,
+      has_transcription_key: !!transcription_api_key,
       ...safe,
     })
   } catch (err) {
@@ -125,6 +133,19 @@ export async function POST(request: Request) {
         : ''
     const clearEmbeddingsKey = body.embeddings_api_key === null
 
+    // Transcription fallback key + optional model override — same
+    // set/clear/unchanged semantics as the embeddings key above.
+    const rawTranscriptionKey =
+      typeof body.transcription_api_key === 'string'
+        ? body.transcription_api_key.trim()
+        : ''
+    const clearTranscriptionKey = body.transcription_api_key === null
+    const transcriptionModelProvided = 'transcription_model' in body
+    const transcriptionModel =
+      typeof body.transcription_model === 'string'
+        ? body.transcription_model.trim() || null
+        : null
+
     // Reuse the stored key when the form didn't send a fresh one.
     const { data: existing } = await supabase
       .from('ai_configs')
@@ -184,7 +205,10 @@ export async function POST(request: Request) {
     // embed), same "verify before save" discipline as the chat key.
     if (rawEmbeddingsKey) {
       try {
-        await embedTexts(rawEmbeddingsKey, ['ping'])
+        await embedTexts(
+          { baseUrl: OPENAI_API_BASE, apiKey: rawEmbeddingsKey, model: EMBEDDING_MODEL },
+          ['ping'],
+        )
       } catch (err) {
         if (err instanceof AiError) {
           return NextResponse.json(
@@ -214,6 +238,12 @@ export async function POST(request: Request) {
     } else if (clearEmbeddingsKey) {
       shared.embeddings_api_key = null
     }
+    if (rawTranscriptionKey) {
+      shared.transcription_api_key = encrypt(rawTranscriptionKey)
+    } else if (clearTranscriptionKey) {
+      shared.transcription_api_key = null
+    }
+    if (transcriptionModelProvided) shared.transcription_model = transcriptionModel
 
     if (existing) {
       const { error: upErr } = await supabase

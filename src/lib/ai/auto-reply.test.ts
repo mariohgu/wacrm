@@ -18,7 +18,10 @@ const h = vi.hoisted(() => ({
   },
 }))
 
-vi.mock('./config', () => ({ loadAiConfig: h.loadAiConfig }))
+vi.mock('./config', () => ({
+  loadAiConfig: h.loadAiConfig,
+  deriveEmbeddingsEndpoint: () => null,
+}))
 vi.mock('./context', () => ({
   buildConversationContext: h.buildConversationContext,
   buildCustomerContext: h.buildCustomerContext,

@@ -1,5 +1,5 @@
 import type { SupabaseClient } from '@supabase/supabase-js'
-import type { AiConfig } from './types'
+import type { AuxiliaryEndpoint } from './config'
 import { chunkText } from './chunk'
 import { embedTexts, toVectorLiteral } from './embeddings'
 
@@ -27,7 +27,7 @@ interface MatchRow {
 export async function ingestDocument(
   db: SupabaseClient,
   accountId: string,
-  config: Pick<AiConfig, 'embeddingsApiKey'>,
+  embeddingsEndpoint: AuxiliaryEndpoint | null,
   documentId: string,
   content: string,
 ): Promise<void> {
@@ -50,9 +50,9 @@ export async function ingestDocument(
   // search really does still work.
   let embeddings: number[][] | null = null
   let embedError: unknown = null
-  if (config.embeddingsApiKey) {
+  if (embeddingsEndpoint) {
     try {
-      embeddings = await embedTexts(config.embeddingsApiKey, chunks)
+      embeddings = await embedTexts(embeddingsEndpoint, chunks)
     } catch (err) {
       embedError = err
     }
@@ -84,7 +84,7 @@ export async function ingestDocument(
 export async function retrieveKnowledge(
   db: SupabaseClient,
   accountId: string,
-  config: Pick<AiConfig, 'embeddingsApiKey'>,
+  embeddingsEndpoint: AuxiliaryEndpoint | null,
   queryText: string,
   k = 5,
 ): Promise<string[]> {
@@ -108,9 +108,9 @@ export async function retrieveKnowledge(
   const picked = new Map<string, string>() // id → content, preserves order
 
   // Semantic path.
-  if (config.embeddingsApiKey) {
+  if (embeddingsEndpoint) {
     try {
-      const [queryEmbedding] = await embedTexts(config.embeddingsApiKey, [query])
+      const [queryEmbedding] = await embedTexts(embeddingsEndpoint, [query])
       if (queryEmbedding) {
         const { data, error } = await db.rpc('match_ai_knowledge_semantic', {
           p_account_id: accountId,

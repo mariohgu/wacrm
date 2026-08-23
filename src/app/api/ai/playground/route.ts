@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server'
 import { requireRole, toErrorResponse } from '@/lib/auth/account'
 import { checkRateLimit, rateLimitResponse, RATE_LIMITS } from '@/lib/rate-limit'
-import { loadAiConfig } from '@/lib/ai/config'
+import { loadAiConfig, deriveEmbeddingsEndpoint } from '@/lib/ai/config'
 import { retrieveKnowledge } from '@/lib/ai/knowledge'
 import { generateReply } from '@/lib/ai/generate'
 import { buildSystemPrompt } from '@/lib/ai/defaults'
@@ -75,7 +75,7 @@ export async function POST(request: Request) {
     const knowledge = await retrieveKnowledge(
       supabase,
       accountId,
-      config,
+      deriveEmbeddingsEndpoint(config),
       latestUserMessage(messages),
     )
     const systemPrompt = buildSystemPrompt({

@@ -1,5 +1,5 @@
 import { supabaseAdmin } from './admin-client'
-import { loadAiConfig } from './config'
+import { loadAiConfig, deriveEmbeddingsEndpoint } from './config'
 import { buildConversationContext, buildCustomerContext } from './context'
 import { retrieveKnowledge } from './knowledge'
 import { generateReply } from './generate'
@@ -104,7 +104,7 @@ export async function dispatchInboundToAiReply(
     const knowledge = await retrieveKnowledge(
       db,
       accountId,
-      config,
+      deriveEmbeddingsEndpoint(config),
       latestUserMessage(messages),
     )
 

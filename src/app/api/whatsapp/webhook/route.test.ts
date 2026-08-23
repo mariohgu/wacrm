@@ -6,6 +6,8 @@ const h = vi.hoisted(() => ({
   dispatchInboundToFlows: vi.fn(),
   dispatchInboundToAiReply: vi.fn(),
   dispatchWebhookEvent: vi.fn(),
+  loadTranscriptionEndpoint: vi.fn(),
+  transcribeAudio: vi.fn(),
   state: {
     // Result the message upsert's .select() resolves to. A genuine insert
     // returns the row; a replayed delivery conflicts and returns [].
@@ -264,6 +266,12 @@ vi.mock('@/lib/flows/engine', () => ({
 vi.mock('@/lib/ai/auto-reply', () => ({
   dispatchInboundToAiReply: h.dispatchInboundToAiReply,
 }))
+vi.mock('@/lib/ai/config', () => ({
+  loadTranscriptionEndpoint: h.loadTranscriptionEndpoint,
+}))
+vi.mock('@/lib/ai/transcription', () => ({
+  transcribeAudio: h.transcribeAudio,
+}))
 vi.mock('@/lib/webhooks/deliver', () => ({
   dispatchWebhookEvent: h.dispatchWebhookEvent,
 }))
@@ -347,6 +355,10 @@ beforeEach(() => {
   h.dispatchInboundToFlows.mockResolvedValue({ consumed: false })
   h.dispatchInboundToAiReply.mockResolvedValue(undefined)
   h.dispatchWebhookEvent.mockResolvedValue(undefined)
+  // Default: no transcription key configured — existing behavior for
+  // every test that doesn't explicitly opt in below.
+  h.loadTranscriptionEndpoint.mockResolvedValue(null)
+  h.transcribeAudio.mockResolvedValue(null)
   h.runAutomationsForTrigger.mockImplementation(() => {
     h.state.automationStarted++
     return new Promise<void>((resolve) => {
@@ -756,5 +768,40 @@ describe('inbound webhook: after() awaits automations (#368)', () => {
     // If the dispatches were fire-and-forget, completed would still be 0
     // here — the callback would have resolved before the timers fired.
     expect(h.state.automationCompleted).toBe(3)
+  })
+})
+
+const AUDIO_MESSAGE = {
+  id: 'wamid.AUDIO1',
+  from: '15551230000',
+  timestamp: '1700000000',
+  type: 'audio',
+  audio: { id: 'media-audio-1', mime_type: 'audio/ogg' },
+}
+
+describe('inbound webhook: voice-note transcription', () => {
+  it('sets content_text to the transcript when a transcription key is configured', async () => {
+    h.loadTranscriptionEndpoint.mockResolvedValue({
+      baseUrl: 'https://api.openai.com/v1',
+      apiKey: 'sk-x',
+      model: 'gpt-4o-mini-transcribe',
+    })
+    h.transcribeAudio.mockResolvedValue('hola, necesito ayuda')
+
+    await runWebhook(AUDIO_MESSAGE)
+
+    expect(h.state.upsertCalls).toHaveLength(1)
+    expect(h.state.upsertCalls[0].row.content_text).toBe('hola, necesito ayuda')
+    expect(h.state.upsertCalls[0].row.content_type).toBe('audio')
+  })
+
+  it('leaves content_text null when no transcription key is configured (unchanged behavior)', async () => {
+    // Default beforeEach state already has loadTranscriptionEndpoint
+    // resolving null — this asserts that default explicitly.
+    await runWebhook(AUDIO_MESSAGE)
+
+    expect(h.transcribeAudio).not.toHaveBeenCalled()
+    expect(h.state.upsertCalls).toHaveLength(1)
+    expect(h.state.upsertCalls[0].row.content_text).toBeNull()
   })
 })

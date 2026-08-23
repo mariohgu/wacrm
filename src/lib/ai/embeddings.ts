@@ -1,4 +1,5 @@
 import { AiError } from './types'
+import type { AuxiliaryEndpoint } from './config'
 import { aiRequestTimeoutMs } from './defaults'
 import { providerHttpError, toNetworkError } from './providers/shared'
 
@@ -6,14 +7,15 @@ import { providerHttpError, toNetworkError } from './providers/shared'
 // Embeddings (OpenAI-compatible).
 //
 // Used for the knowledge base's optional semantic-search path: embed
-// each chunk at ingest, and embed the query at retrieval. Anthropic has
-// no embeddings endpoint, so this is always OpenAI's — the account
-// supplies a (possibly separate) embeddings key. 1536-dim
-// text-embedding-3-small matches the `vector(1536)` column in
-// migration 030.
+// each chunk at ingest, and embed the query at retrieval. The caller
+// resolves WHERE to send the request (OpenAI direct, OpenRouter using
+// the account's main key, or a dedicated fallback key for Anthropic
+// accounts) via `config.ts`'s `loadEmbeddingsEndpoint`/
+// `deriveEmbeddingsEndpoint` — this module just calls whatever
+// `AuxiliaryEndpoint` it's given. 1536-dim text-embedding-3-small
+// matches the `vector(1536)` column in migration 030; see the
+// dimension check in `embedTexts` below.
 // ============================================================
-
-const OPENAI_EMBEDDINGS_URL = 'https://api.openai.com/v1/embeddings'
 
 export const EMBEDDING_MODEL = 'text-embedding-3-small'
 export const EMBEDDING_DIMENSIONS = 1536
@@ -39,7 +41,7 @@ export function toVectorLiteral(embedding: number[]): string {
  * to degrade (retrieval) or surface (ingest).
  */
 export async function embedTexts(
-  apiKey: string,
+  endpoint: AuxiliaryEndpoint,
   inputs: string[],
 ): Promise<number[][]> {
   if (inputs.length === 0) return []
@@ -51,13 +53,13 @@ export async function embedTexts(
 
     let res: Response
     try {
-      res = await fetch(OPENAI_EMBEDDINGS_URL, {
+      res = await fetch(`${endpoint.baseUrl}/embeddings`, {
         method: 'POST',
         headers: {
-          Authorization: `Bearer ${apiKey}`,
+          Authorization: `Bearer ${endpoint.apiKey}`,
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify({ model: EMBEDDING_MODEL, input: batch }),
+        body: JSON.stringify({ model: endpoint.model, input: batch }),
         signal: AbortSignal.timeout(timeoutMs),
       })
     } catch (err) {
@@ -65,7 +67,7 @@ export async function embedTexts(
     }
 
     if (!res.ok) {
-      throw await providerHttpError('OpenAI embeddings', res)
+      throw await providerHttpError('Embeddings', res)
     }
 
     const data = (await res.json().catch(() => null)) as EmbeddingResponse | null
@@ -91,6 +93,16 @@ export async function embedTexts(
         throw new AiError('Embeddings response missing a vector.', {
           code: 'embeddings_malformed',
         })
+      }
+      // A mistyped model id (or a future provider default drifting) could
+      // silently return a differently-sized vector — catch it here,
+      // before it reaches the fixed-width `vector(1536)` column, rather
+      // than as an opaque Postgres error at insert time.
+      if (r.embedding.length !== EMBEDDING_DIMENSIONS) {
+        throw new AiError(
+          `Embeddings response returned a ${r.embedding.length}-dim vector, expected ${EMBEDDING_DIMENSIONS}. Check the configured model.`,
+          { code: 'embeddings_dimension_mismatch' },
+        )
       }
       out.push(r.embedding)
     }

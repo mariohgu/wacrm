@@ -3,6 +3,8 @@ import { createClient } from '@supabase/supabase-js'
 import { decrypt, encrypt, isLegacyFormat } from '@/lib/whatsapp/encryption'
 import { getMediaUrl, downloadMedia } from '@/lib/whatsapp/meta-api'
 import { mirrorInboundMedia } from '@/lib/whatsapp/mirror-inbound-media'
+import { loadTranscriptionEndpoint } from '@/lib/ai/config'
+import { transcribeAudio } from '@/lib/ai/transcription'
 import { normalizePhone, looksLikePhoneNumber } from '@/lib/whatsapp/phone-utils'
 import { findExistingContact, isUniqueViolation } from '@/lib/contacts/dedupe'
 import { reopenClosedConversation } from '@/lib/conversations/reopen'
@@ -681,6 +683,7 @@ async function processMessage(
     await parseMessageContent(
       message,
       accessToken,
+      accountId,
       mirrorMedia ? { accountId } : null
     )
 
@@ -946,8 +949,13 @@ async function processMessage(
 async function parseMessageContent(
   message: WhatsAppMessage,
   accessToken: string,
-  // Tenancy + opt-out for the media mirror. Null disables mirroring
-  // entirely, which is what the account-level toggle does.
+  // Tenancy — drives the transcription-endpoint lookup below.
+  // Unconditional (unlike `mirror`), since transcription has its own
+  // independent opt-in (whether a transcription-capable key is
+  // configured), not an account-level toggle.
+  accountId: string,
+  // Opt-out for the media mirror. Null disables mirroring entirely,
+  // which is what the account-level toggle does.
   mirror: { accountId: string } | null
 ): Promise<{
   contentText: string | null
@@ -1011,6 +1019,38 @@ async function parseMessageContent(
     }
   }
 
+  // Transcribes a voice note to text when the account has a
+  // transcription-capable key configured (OpenAI/OpenRouter accounts
+  // need nothing extra — see loadTranscriptionEndpoint); returns null
+  // (skip, zero extra calls) when it isn't. Deliberately re-fetches the
+  // media via Meta rather than reusing verifyAndBuildUrl's result:
+  // `media_url` can be a relative, non-fetchable proxy path when the
+  // account has mirroring disabled, and mirrorInboundMedia doesn't
+  // expose the buffer it already downloaded. Best-effort — a failure
+  // here must never break message ingestion.
+  const transcribeIfConfigured = async (
+    mediaId: string,
+    mimeType?: string | null
+  ): Promise<string | null> => {
+    try {
+      const endpoint = await loadTranscriptionEndpoint(supabaseAdmin(), accountId)
+      if (!endpoint) return null
+      const info = await getMediaUrl({ mediaId, accessToken })
+      const { buffer } = await downloadMedia({ downloadUrl: info.url, accessToken })
+      return await transcribeAudio({
+        endpoint,
+        audioBuffer: buffer,
+        mimeType: info.mimeType ?? mimeType ?? null,
+      })
+    } catch (error) {
+      console.error(
+        `Failed to transcribe audio ${mediaId}:`,
+        error instanceof Error ? error.message : error
+      )
+      return null
+    }
+  }
+
   // Default shape — each case overrides only the fields it cares about.
   // Keeps the new `interactiveReplyId` field DRY across every return site.
   const empty = {
@@ -1068,6 +1108,10 @@ async function parseMessageContent(
       if (message.audio?.id) {
         return {
           ...empty,
+          contentText: await transcribeIfConfigured(
+            message.audio.id,
+            message.audio.mime_type
+          ),
           mediaUrl: await verifyAndBuildUrl(message.audio.id),
           mediaType: message.audio.mime_type,
         }

@@ -11,6 +11,7 @@ import {
   LayoutTemplate,
   CornerDownLeft,
   Sparkles,
+  Captions,
 } from "lucide-react";
 import { format } from "date-fns";
 import { ReplyQuote } from "./reply-quote";
@@ -120,6 +121,24 @@ function MessageContent({
             <MediaAudioBubble message={message} t={t} />
           ) : (
             <MediaUnavailable label={t("audio")} t={t} />
+          )}
+          {message.content_text && (
+            <div className="mt-1">
+              <span
+                className={cn(
+                  "inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide",
+                  isAgent
+                    ? "bg-primary-foreground/20 text-primary-foreground"
+                    : "bg-primary/20 text-primary",
+                )}
+              >
+                <Captions className="h-3 w-3" />
+                {t("transcript")}
+              </span>
+              <p className="mt-1 whitespace-pre-wrap break-words text-sm italic opacity-90">
+                {message.content_text}
+              </p>
+            </div>
           )}
         </div>
       );

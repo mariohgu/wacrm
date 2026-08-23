@@ -58,7 +58,9 @@ dependency — every provider is a plain `fetch` adapter under
 - `defaults.ts` — `AI_PROVIDER_DEFAULT_MODEL` per-provider default model
   (free text in the UI, not an allow-list — model IDs churn)
 - `config.ts` — `loadAiConfig` reads + decrypts the account's row from
-  `ai_configs` (AES-256-GCM at rest via `src/lib/whatsapp/encryption.ts`)
+  `ai_configs` (AES-256-GCM at rest via `src/lib/whatsapp/encryption.ts`).
+  Also owns `resolveAuxiliaryEndpoint` — see "Auxiliary OpenAI-only
+  capabilities" below for what that's for.
 - `generate.ts` — `generateReply` dispatches to the right provider
   adapter by `config.provider`, then strips the `[[HANDOFF]]` sentinel
 - `context.ts` — `buildConversationContext` (last N text messages →
@@ -79,8 +81,11 @@ dependency — every provider is a plain `fetch` adapter under
 - `providers/{openai,anthropic,openrouter}.ts` — one adapter per
   provider; `providers/shared.ts` has the cross-provider helpers
   (usage normalization, HTTP/network error mapping, turn merging)
-- `embeddings.ts` — separate, OpenAI-only (no Anthropic/OpenRouter
-  embeddings API), optional semantic KB search
+- `embeddings.ts` — optional semantic KB search (`embedTexts`, fixed at
+  `text-embedding-3-small`/1536-dim to match the `vector(1536)` column
+  in migration 030 — see the auxiliary-endpoint section below for how
+  it's reached)
+- `transcription.ts` — `transcribeAudio`, voice-note → text (see below)
 - UI: `src/components/settings/ai-config.tsx` (provider/model/key form),
   `src/components/agents/ai-playground.tsx`, `ai-usage.tsx`
 - API: `src/app/api/ai/config/route.ts` (save/load, validates key with
@@ -90,6 +95,91 @@ dependency — every provider is a plain `fetch` adapter under
   `supabase/migrations/029_ai_reply.sql`), `ai_usage_log` (token spend,
   `033_ai_reply_polish.sql`) — both CHECK-constrain `provider`, so a new
   provider needs a migration widening both constraints, not just app code
+
+### Auxiliary OpenAI-only capabilities (embeddings, transcription)
+
+Two features need an OpenAI-compatible endpoint that isn't the chat
+`generateReply` path: embedding the knowledge base (`embeddings.ts`)
+and transcribing inbound voice notes (`transcription.ts`, see the
+"Voice-note transcription" section below). Neither Anthropic nor
+plain-OpenAI-SDK usage covers this for an account on another
+provider — but **OpenRouter now offers both an `/embeddings` and an
+`/audio/transcriptions` endpoint**, OpenAI-wire-compatible, using the
+same key already configured for chat (vendor-prefixed model ids like
+`openai/text-embedding-3-small`, `openai/gpt-4o-mini-transcribe`).
+
+`config.ts`'s `resolveAuxiliaryEndpoint` is the single place that
+decides where to send these requests, given the account's already-
+configured `provider`/`api_key`:
+
+1. **A fallback key wins first** (`embeddings_api_key` /
+   `transcription_api_key`) — always routes to `api.openai.com`
+   directly. This is the only path for an Anthropic account (no
+   native endpoint at all), and always takes precedence for any
+   provider so an account that configured one before this routing
+   existed sees no behavior change.
+2. **`provider: 'openai'`** — routes to `api.openai.com` using the
+   main chat key, no extra configuration needed.
+3. **`provider: 'openrouter'`** — routes to `openrouter.ai/api/v1`
+   using the main chat key, with a vendor-prefixed default model.
+4. Anthropic with no fallback key → `null` (no capability).
+
+Two async wrappers query `ai_configs` directly:
+`loadEmbeddingsEndpoint` (replaces the old `loadEmbeddingsKey` —
+independent of `is_active`, used by the 3 knowledge ingest/reindex
+routes) and `loadTranscriptionEndpoint` (used only by the inbound
+webhook). A third, synchronous `deriveEmbeddingsEndpoint(config)`
+resolves from an already-loaded `AiConfig` — used by
+draft/auto-reply/playground, which have one in hand already, to avoid
+a second DB round trip on the reply hot path.
+
+Embeddings deliberately has **no model override** — the KB's vectors
+are anchored to a fixed 1536-dim column (migration 030), so letting an
+account pick an arbitrary model risks a dimension mismatch;
+`embedTexts` now also throws if a returned vector isn't exactly 1536
+dims, catching a bad model id before it reaches the DB. Transcription
+**does** allow a model override (`ai_configs.transcription_model`,
+migration 040) — plain text output has no such constraint.
+
+## Voice-note transcription
+
+Inbound WhatsApp voice notes are transcribed to text at webhook-
+ingestion time and written into the existing `messages.content_text`
+column (previously always `null` for audio — WhatsApp doesn't carry a
+caption field on voice notes). That single write is what makes this
+"free" everywhere else: the Inbox bubble, `buildConversationContext`
+(widened from `.eq('content_type','text')` to
+`.in('content_type', ['text','audio'])`), and any automation/Flow logic
+already reading `content_text` all pick it up with no separate wiring.
+
+- `src/app/api/whatsapp/webhook/route.ts`'s `parseMessageContent`
+  (audio case) calls `loadTranscriptionEndpoint` — `null` (no key
+  configured on any path) skips transcription entirely, same
+  `content_text: null` as before this existed. When resolved, it
+  downloads the audio via `getMediaUrl`/`downloadMedia`
+  (`src/lib/whatsapp/meta-api.ts` — the same primitives
+  `mirror-inbound-media.ts` already uses) rather than reading
+  `messages.media_url`, since that can be a relative,
+  non-server-fetchable proxy path when the account has media
+  mirroring disabled.
+- `transcription.ts`'s `transcribeAudio` never throws — network
+  errors, a non-2xx response, a missing `text` field, or a buffer over
+  OpenAI's 25MB cap all log and return `null`, so a transcription
+  failure can never break inbound message ingestion. Confirmed against
+  OpenAI's/OpenRouter's own docs that OGG (WhatsApp's voice-note
+  format) is accepted directly — no server-side audio
+  conversion/`ffmpeg` needed, consistent with this project's own PR
+  history removing server-side ffmpeg for voice notes.
+- Inbox display: `message-bubble.tsx`'s `case "audio":` shows a small
+  "Transcript" chip (mirroring the `case "template":` badge pattern) +
+  the text in italics when `content_text` is present — visually
+  distinct from a real caption, so it doesn't read as customer-typed.
+- No live "Test key" validation for the transcription fallback field
+  (unlike embeddings' cheap synthetic-embed ping) — there's no cheap
+  way to validate without sending a real audio sample, and
+  synthesizing one server-side would reintroduce the audio-processing
+  complexity this project deliberately avoided. An invalid key/model
+  just means transcription silently doesn't happen.
 
 Adding a provider = extend `AiProvider` (`types.ts`), add a default
 model (`defaults.ts`), add a `providers/<name>.ts` adapter (OpenAI-shaped
@@ -1028,3 +1118,134 @@ verified against a live LLM call this session (no provider key
 available) — manual recommended: with an AI config active, message in
 as a contact who already has a name + real phone saved, and confirm the
 draft/auto-reply doesn't ask for information already on file.
+
+## 2026-08-23 — Voice-note transcription + provider-aware auxiliary key routing
+
+User asked whether the AI agent can understand a voice note a customer
+sends. Confirmed nothing did this yet (`buildConversationContext`
+excluded `content_type='audio'` at the SQL level; the webhook never
+wrote `content_text` for audio) and that the upstream repo
+(`ArnasDon/wacrm`) has no prior art either — its own audio-related
+PRs/issues (#496, #467, #262, #259, #213, #201, #14) are all about
+recording/sending/displaying voice notes, never about the AI
+understanding them.
+
+First design assumed a dedicated OpenAI-only key, mirroring
+`embeddings.ts`'s existing pattern. The user corrected this: they use
+**OpenRouter**, which lets you declare any underlying model (including
+OpenAI's) for a given task — so instead of a new key, the existing
+OpenRouter key should just work, with a declarable model. Confirmed via
+WebFetch/WebSearch against OpenRouter's own docs/blog: OpenRouter now
+exposes both `/api/v1/audio/transcriptions` and `/api/v1/embeddings`,
+OpenAI-wire-compatible, using the **same key** as chat completions —
+so this became a broader fix than just transcription (the user
+explicitly asked to apply the same idea to embeddings, which had been
+OpenAI-only since it shipped).
+
+Touched:
+
+- [src/lib/ai/config.ts](src/lib/ai/config.ts) — new
+  `AuxiliaryEndpoint` type + `resolveAuxiliaryEndpoint`: given the
+  account's provider/main key, resolves where to send an auxiliary
+  (embeddings/transcription) request — `api.openai.com` direct for
+  `provider: 'openai'`, `openrouter.ai/api/v1` (same key, vendor-
+  prefixed model) for `provider: 'openrouter'`, and a dedicated
+  fallback key (only path for Anthropic) otherwise — with the fallback
+  key always taking precedence when configured, so an account that set
+  one up before this existed sees no behavior change. New
+  `loadEmbeddingsEndpoint` (replaces `loadEmbeddingsKey`, same
+  `is_active`-independent contract, now returns `{endpoint, corrupt}`),
+  `deriveEmbeddingsEndpoint` (sync, from an already-loaded `AiConfig` —
+  avoids a second DB round trip in draft/auto-reply/playground), and
+  `loadTranscriptionEndpoint` (new, used only by the webhook).
+- [src/lib/ai/embeddings.ts](src/lib/ai/embeddings.ts) — `embedTexts`
+  takes an `AuxiliaryEndpoint` instead of a bare API key; URL and model
+  come from the resolved endpoint instead of a hardcoded OpenAI
+  constant. Added a dimension check (embedding response must be
+  exactly 1536-dim, matching migration 030's `vector(1536)` column) so
+  a bad model id fails loud at the API boundary instead of corrupting
+  the KB or erroring opaquely at insert time.
+- [src/lib/ai/knowledge.ts](src/lib/ai/knowledge.ts) — `ingestDocument`/
+  `retrieveKnowledge` take `AuxiliaryEndpoint | null` instead of
+  `Pick<AiConfig,'embeddingsApiKey'>`; the semantic-path gate is now
+  "is there a resolved endpoint" rather than "is a key configured" —
+  6 call sites updated: the 3 knowledge routes (now call
+  `loadEmbeddingsEndpoint`) and draft/auto-reply/playground (now call
+  `deriveEmbeddingsEndpoint(config)`, no extra query since they already
+  hold a loaded `AiConfig`).
+- [src/lib/ai/transcription.ts](src/lib/ai/transcription.ts) — new,
+  `transcribeAudio`: POSTs multipart/form-data to
+  `<endpoint.baseUrl>/audio/transcriptions`. Never throws (every
+  failure — network, non-2xx, malformed response, >25MB buffer — logs
+  and returns `null`), unlike `embedTexts`, since a transcription
+  failure must never break inbound message ingestion. Confirmed OGG
+  (WhatsApp's voice-note format) is accepted directly by both OpenAI
+  and OpenRouter — no server-side conversion/`ffmpeg` needed (this
+  project deliberately removed server-side ffmpeg for voice notes in
+  an earlier PR).
+- [src/app/api/whatsapp/webhook/route.ts](src/app/api/whatsapp/webhook/route.ts)
+  — `parseMessageContent` gained an unconditional `accountId` param
+  (previously only threaded through conditionally, inside the
+  media-mirror opt-out object); its `audio` case now calls
+  `loadTranscriptionEndpoint` and, when resolved, downloads the voice
+  note via `getMediaUrl`/`downloadMedia` (deliberately NOT via
+  `media_url` — that can be a relative, non-fetchable proxy path when
+  the account has media mirroring disabled) and sets `content_text` to
+  the transcript.
+- [src/lib/ai/context.ts](src/lib/ai/context.ts) —
+  `buildConversationContext`'s filter widened from
+  `.eq('content_type', 'text')` to
+  `.in('content_type', ['text', 'audio'])` — a transcribed voice note
+  now feeds the AI's context the same as a typed message; an audio row
+  with no transcript is still dropped by the existing empty-text filter.
+- [src/components/inbox/message-bubble.tsx](src/components/inbox/message-bubble.tsx)
+  — the `case "audio":` block now shows a "Transcript" chip + italic
+  text below the audio player when `content_text` is present.
+- [src/components/settings/ai-config.tsx](src/components/settings/ai-config.tsx),
+  [src/app/api/ai/config/route.ts](src/app/api/ai/config/route.ts) —
+  new transcription fallback-key field + free-text model-override
+  field, mirroring the embeddings key's UI/API treatment exactly; the
+  embeddings key's hint text updated to explain it's now only needed
+  for Anthropic. No live "Test key" button for transcription (see the
+  new CLAUDE.md section above for why). `handleRemove` (DELETE) now
+  also resets the embeddings/transcription key UI state — previously
+  didn't, a small pre-existing gap fixed in passing since I was already
+  touching that function.
+- [supabase/migrations/040_transcription_key.sql](supabase/migrations/040_transcription_key.sql)
+  — **new migration, must be applied**: `ai_configs.transcription_api_key`
+  (encrypted fallback key) + `ai_configs.transcription_model` (free-text
+  override).
+- `messages/en.json`, `es.json`, `ko.json` — new keys for the
+  transcription field/model/hint, the Inbox transcript chip, and the
+  updated embeddings hint text.
+- Tests: `config.test.ts` (new `resolveAuxiliaryEndpoint` coverage via
+  `loadEmbeddingsEndpoint`/`deriveEmbeddingsEndpoint`/
+  `loadTranscriptionEndpoint` — every provider + fallback-key
+  precedence + corrupt-key handling), `embeddings.test.ts` (ported to
+  `AuxiliaryEndpoint`, new dimension-mismatch case),
+  `knowledge.test.ts` (ported to `AuxiliaryEndpoint | null`),
+  `context.test.ts` (fake DB chain gained `.in()`), new
+  `transcription.test.ts` (success, HTTP error, malformed response,
+  network error, oversized buffer skipped before any fetch, model
+  passed through), new cases in
+  `webhook/route.test.ts` (audio message + configured key → transcript
+  in `content_text`; no key configured → unchanged `null` behavior).
+
+Verified: `npx tsc --noEmit` clean (the `embedTexts`/`ingestDocument`/
+`retrieveKnowledge` signature changes are disruptive at the type level,
+so this caught every call site); `npx eslint` on every touched file (0
+errors, 1 pre-existing unrelated warning); `npx vitest run
+src/i18n/messages.test.ts` (4/4); full `npx vitest run` (897/899 — only
+the same pre-existing, unrelated `date-utils.test.ts` `mondayIndex`
+timezone flakiness). Not verified against a live transcription/
+embeddings call this session (no provider key available) — manual
+recommended: with an OpenRouter (or OpenAI) chat key already configured
+and NO transcription/embeddings key entered, send a voice note and
+confirm the Inbox shows a transcript, and separately confirm the
+knowledge base's semantic search still works without ever having
+entered an embeddings key.
+
+> **Migration required for self-hosters:** apply
+> `supabase/migrations/040_transcription_key.sql` before voice notes
+> will transcribe (only needed if you want transcription at all — the
+> feature is fully opt-in and inert without it).
