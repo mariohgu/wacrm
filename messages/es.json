@@ -60,6 +60,13 @@
   "ModeToggle": {
     "switchMode": "Cambiar a modo {mode}"
   },
+  "AccountAccess": {
+    "unlinkedTitle": "Este usuario no está vinculado a una cuenta",
+    "unlinkedBody": "Nada de lo que cambies se guardará mientras esto no se resuelva — la base de datos rechaza toda escritura de un usuario sin cuenta o rol. Si te invitaron a un equipo, pide al propietario que reenvíe la invitación. En una instalación autoalojada, verifica que la migración de inicialización de cuenta se haya ejecutado para este usuario.",
+    "errorTitle": "No se pudieron cargar tus permisos",
+    "errorBody": "El rol de tu cuenta no se cargó, así que toda acción se trata como de solo lectura y los cambios no se guardarán. Verifica tu conexión e inténtalo de nuevo.",
+    "retry": "Reintentar"
+  },
   "Dashboard": {
     "page": {
       "title": "Panel",
@@ -674,7 +681,16 @@
         "failed": "Fallido"
       },
       "toastFailedDelete": "Error al eliminar: {error}",
-      "toastDeleted": "Difusión eliminada"
+      "toastDeleted": "Difusión eliminada",
+      "resumeTitle": "Algunos destinatarios necesitan otro intento",
+      "resumeStalledTitle": "Esta campaña se detuvo a mitad de camino",
+      "resumeHint": "{count} destinatarios fallaron. Reintentar los envía de nuevo desde el servidor.",
+      "resumeStalledHint": "{count} destinatarios nunca se enviaron — la pestaña del navegador que ejecutaba esta campaña se cerró antes de que terminara. Reanudar la completa desde el servidor.",
+      "resumePending": "Reanudar envío ({count})",
+      "retryFailed": "Reintentar fallidos ({count})",
+      "toastResumeStarted": "Enviando a {count} destinatarios en segundo plano.",
+      "toastResumeStartedCapped": "Enviando a {count} destinatarios en segundo plano. {remaining} más necesitarán otra ejecución.",
+      "toastResumeFailed": "No se pudo reanudar: {error}"
     },
     "new": {
       "title": "Nueva difusión",
@@ -1501,6 +1517,12 @@
       "webhookTitle": "Configuración del webhook",
       "webhookDesc": "Usa esta URL como callback de tu webhook en el panel de Meta App.",
       "webhookUrl": "URL de callback del webhook",
+      "mediaTitle": "Almacenamiento de archivos adjuntos",
+      "mediaDesc": "Meta elimina los archivos multimedia recibidos unos 30 días después de que llegan. Los archivos adjuntos se pueden copiar a tu propio almacenamiento para que sigan estando disponibles.",
+      "mirrorInbound": "Conservar archivos adjuntos entrantes",
+      "mirrorInboundDesc": "Guarda una copia de cada foto, video, nota de voz y documento que envíen los clientes. Usa tu almacenamiento de Supabase; los archivos de más de 16 MB se omiten.",
+      "mirrorInboundOffWarning": "Los nuevos archivos adjuntos dejarán de copiarse y quedarán no disponibles unos 30 días después de que lleguen.",
+      "mirrorInboundSaveFailed": "No se pudo actualizar la configuración de archivos adjuntos.",
       "saving": "Guardando...",
       "saveConfig": "Guardar configuración",
       "testing": "Probando...",

@@ -209,4 +209,46 @@ describe('dispatchInboundToAiReply — handoff', () => {
       assigned_agent_id: 'agent-7',
     })
   })
+
+  it('sends a paired farewell message before going quiet, claiming a slot for it', async () => {
+    h.generateReply.mockResolvedValue({
+      text: 'A team member will take it from here shortly.',
+      handoff: true,
+    })
+    await dispatchInboundToAiReply(ARGS)
+    expect(h.state.rpcCalls).toEqual([
+      {
+        name: 'claim_ai_reply_slot',
+        args: { conversation_id: 'conv-1', max_replies: 3 },
+      },
+    ])
+    expect(h.engineSendText).toHaveBeenCalledWith(
+      expect.objectContaining({
+        conversationId: 'conv-1',
+        text: 'A team member will take it from here shortly.',
+      }),
+    )
+    expect(h.state.updatePayload).toMatchObject({ ai_autoreply_disabled: true })
+  })
+
+  it('still hands off even when the farewell message loses the slot-claim race', async () => {
+    h.state.claim = false
+    h.generateReply.mockResolvedValue({
+      text: 'A team member will take it from here shortly.',
+      handoff: true,
+    })
+    await dispatchInboundToAiReply(ARGS)
+    expect(h.engineSendText).not.toHaveBeenCalled()
+    expect(h.state.updatePayload).toMatchObject({ ai_autoreply_disabled: true })
+  })
+
+  it('still hands off even when sending the farewell message throws', async () => {
+    h.engineSendText.mockRejectedValue(new Error('WhatsApp API down'))
+    h.generateReply.mockResolvedValue({
+      text: 'A team member will take it from here shortly.',
+      handoff: true,
+    })
+    await dispatchInboundToAiReply(ARGS)
+    expect(h.state.updatePayload).toMatchObject({ ai_autoreply_disabled: true })
+  })
 })

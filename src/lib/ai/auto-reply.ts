@@ -140,6 +140,35 @@ export async function dispatchInboundToAiReply(
       // and (c) leave a short internal note so whoever picks it up has
       // context. Assigning fires the `on_conversation_assigned` trigger,
       // which notifies the agent.
+
+      // The model can pair the sentinel with a customer-facing message
+      // (e.g. a graceful "a human will take it from here" line) — send it
+      // before going quiet, gated by the same atomic reply-slot claim as
+      // a normal reply so it still counts against the per-conversation
+      // cap and can't race a concurrent inbound. Best-effort: a send
+      // failure must not skip the handoff bookkeeping below, or the
+      // conversation is silently stuck in bot mode with no human queued.
+      if (text) {
+        try {
+          const { data: claimed } = await db.rpc('claim_ai_reply_slot', {
+            conversation_id: conversationId,
+            max_replies: config.autoReplyMaxPerConversation,
+          })
+          if (claimed === true) {
+            await engineSendText({
+              accountId,
+              userId: configOwnerUserId,
+              conversationId,
+              contactId,
+              text,
+              aiGenerated: true,
+            })
+          }
+        } catch (err) {
+          console.error('[ai auto-reply] handoff message send failed:', err)
+        }
+      }
+
       const summary = buildHandoffSummary({
         messages,
         replyCount: conv.ai_reply_count ?? 0,
