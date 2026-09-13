@@ -108,11 +108,21 @@ export interface NotifyInboundArgs {
  * Compose and send the push for one inbound message. Never throws.
  * Does nothing (and runs no queries) when VAPID keys aren't configured.
  */
+let warnedNotConfigured = false
+
 export async function notifyInboundMessage(
   db: SupabaseClient,
   args: NotifyInboundArgs,
 ): Promise<void> {
-  if (!isPushConfigured()) return
+  if (!isPushConfigured()) {
+    // Once per server instance — a self-hoster reading the logs should
+    // learn why nothing is ever sent, without one line per message.
+    if (!warnedNotConfigured) {
+      warnedNotConfigured = true
+      console.warn('[push] inbound skipped: VAPID keys not configured on this server')
+    }
+    return
+  }
   try {
     const copy = await loadPushCopy()
 
@@ -142,7 +152,10 @@ export async function notifyInboundMessage(
     const userIds = conv?.assigned_agent_id
       ? [conv.assigned_agent_id]
       : await loadAccountMemberIds(db, args.accountId)
-    if (userIds.length === 0) return
+    if (userIds.length === 0) {
+      console.warn(`[push] inbound: conv=${args.conversationId} no recipients (no members found)`)
+      return
+    }
 
     const name = displayName(person, copy)
     const text = args.previewText.trim()
@@ -195,7 +208,10 @@ export async function notifyInboundMessage(
         }
     }
 
-    await sendPushToUsers(db, { accountId: args.accountId, userIds, payload })
+    const result = await sendPushToUsers(db, { accountId: args.accountId, userIds, payload })
+    console.log(
+      `[push] inbound: conv=${args.conversationId} kind=${args.classification.kind} reason=${args.classification.reasonKey ?? '-'} assigned=${conv?.assigned_agent_id ? 'yes' : 'no'} recipients=${userIds.length} sent=${result.sent} failed=${result.failed} pruned=${result.pruned} badge=${badge}`,
+    )
   } catch (err) {
     console.error('[push] inbound notification failed:', err)
   }

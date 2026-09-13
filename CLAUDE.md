@@ -747,6 +747,43 @@ notification must arrive *exactly when a person has to step in*.
   pinned to `is_account_member(account_id)`; service role writes
   bypass it for pruning. `POST/DELETE /api/push/subscriptions` (any
   member, RLS client, upsert on endpoint).
+- **Diagnostics ("why didn't my push arrive")** — three traps found
+  on the first real test (2026-09-13), none of them a code bug, all
+  invisible from the UI until this existed:
+  1. **A stale worker in control.** The update flow deliberately keeps
+     the previous worker active until the user taps the "new version"
+     toast. Push events go to the ACTIVE worker; a build without a
+     `push` handler (v1) receives the push and shows nothing. The
+     Settings panel now asks the active worker its `VERSION` over a
+     MessageChannel (`GET_VERSION` message in sw.js → `{type:
+     "VERSION", version}`); "registered but no version" = old worker.
+     A waiting update is flagged with an amber card + "Update now"
+     (`applyWaitingUpdate` posts SKIP_WAITING; the registration
+     component reloads on `controllerchange`).
+  2. **Self-assignment creates no notification at all.** Migration
+     027's `notify_conversation_assigned` trigger returns early when
+     `auth.uid() = NEW.assigned_agent_id` — assigning a thread to
+     yourself from the inbox never inserts a `notifications` row, so
+     there is nothing for the bell or the Database Webhook to push.
+     Test assignment pushes from a *second* member, or via the AI
+     handoff (service role → `auth.uid()` is NULL → row is created).
+  3. **The assignment push needs the Supabase Database Webhook**, a
+     one-time dashboard step (see `/api/push/dispatch`); without it,
+     assignment notifications exist in-app only.
+  Tools: `GET /api/push/diagnostics`
+  ([route.ts](src/app/api/push/diagnostics/route.ts), any member) →
+  server env presence/format (no values), `Push` copy load status,
+  the caller's devices (host + endpoint suffix only), account member /
+  device / unread counts. The Settings card runs it alongside the
+  client state (permission, standalone, worker version, waiting
+  update, this browser's subscription and whether the server has it)
+  and offers "Copy result" as JSON — what to ask the user for when a
+  push "didn't arrive". Server side, every inbound message now logs
+  one `[push] inbound: conv=… kind=… reason=… assigned=… recipients=…
+  sent=… failed=… pruned=… badge=…` line, `[push] no subscriptions:
+  …` when the recipient list has no registered device, and
+  `[push] delivered: …` per send — grep Vercel/host logs for
+  `[push]`.
 - **Env** (see .env.local.example): `NEXT_PUBLIC_VAPID_PUBLIC_KEY`,
   `VAPID_PRIVATE_KEY` (generate ONCE with `npx web-push
   generate-vapid-keys`; **rotating silently invalidates every device**),
@@ -2083,3 +2120,47 @@ with no sound, then trigger a handoff → expect a normal notification
 Webhook on `notifications` INSERT → `/api/push/dispatch` with the
 `x-push-secret` header and assign a conversation to yourself from
 another account member → expect a push.
+
+## 2026-09-13 — Push diagnostics: explain a missing notification
+
+User deployed phase 4 (migration + env vars, confirmed by screenshot),
+tested on desktop Chrome, and got no notification — neither for the
+customer message the assistant stopped answering nor after assigning a
+conversation. Screenshot shows exactly three AI replies then an
+unanswered "Ok": that is the default per-conversation cap
+(`auto_reply_max_per_conversation = 3`), so the "Ok" classifies as
+`needs_attention/cap_reached` and a push *was* the expected outcome.
+No server logs or diagnostics were available to say why it didn't
+show, which is the gap this entry closes. See the new **Diagnostics**
+bullet in the Web Push section above for the three traps identified
+(stale worker in control, self-assignment creates no notification,
+assignment push needs the Database Webhook).
+
+Touched:
+
+- [src/app/api/push/diagnostics/route.ts](src/app/api/push/diagnostics/route.ts)
+  — new `GET`.
+- [src/lib/push/send.ts](src/lib/push/send.ts) — `getPushServerStatus`
+  (presence/format only); `[push] no subscriptions` / `[push]
+  delivered` log lines.
+- [src/lib/push/inbound.ts](src/lib/push/inbound.ts) — one `[push]
+  inbound: …` line per message with kind/reason/recipients/result;
+  once-per-instance warning when VAPID isn't configured.
+- [public/sw.js](public/sw.js) — `GET_VERSION` message reply (same
+  VERSION v2; no cache change, so no bump).
+- [src/lib/push/client.ts](src/lib/push/client.ts) — `WorkerInfo`,
+  `getWorkerInfo` (MessageChannel, 1.5s timeout), `applyWaitingUpdate`.
+- [src/components/settings/push-notifications.tsx](src/components/settings/push-notifications.tsx)
+  — amber "update waiting" card with "Update now"; "Diagnostics" card
+  (run / copy JSON) with client + server rows, warnings highlighted.
+- [src/components/pwa/sw.test.ts](src/components/pwa/sw.test.ts) —
+  GET_VERSION case.
+- `messages/{en,es,ko}.json` — 29 `Settings.push.diag*` keys.
+
+Verified: `npx tsc --noEmit` clean; `npx eslint` on every touched file
+(0 errors/warnings); full `npx vitest run` 973/975 (only the same
+pre-existing `date-utils.test.ts` timezone failures); `next build`
+lists `/api/push/diagnostics`. Not verified against the deployed app —
+the user is to deploy, open Settings → Push notifications, apply the
+waiting update if the card shows one, run "Send a test", then run
+"Diagnostics" → "Copy result" and paste it back.

@@ -3,19 +3,32 @@
 import { useCallback, useEffect, useState } from 'react';
 import { useTranslations } from 'next-intl';
 import { toast } from 'sonner';
-import { BellRing, BellOff, Loader2, Send, Smartphone } from 'lucide-react';
+import {
+  AlertTriangle,
+  BellRing,
+  BellOff,
+  ClipboardCopy,
+  Loader2,
+  RefreshCw,
+  Send,
+  Smartphone,
+  Stethoscope,
+} from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
 import { SettingsPanelHead } from './settings-panel-head';
 import {
+  applyWaitingUpdate,
   getCurrentSubscription,
   getServiceWorkerRegistration,
   getVapidPublicKey,
+  getWorkerInfo,
   isIOS,
   isPushSupported,
   isStandaloneDisplay,
   subscribeThisDevice,
   unsubscribeThisDevice,
+  type WorkerInfo,
 } from '@/lib/push/client';
 
 /**
@@ -36,6 +49,17 @@ import {
  *   denied            — the user blocked notifications at the browser
  *                       level; only they can undo that.
  *   enabled / disabled — subscribed here or not.
+ *
+ * Two traps the "Diagnostics" card exists to surface, because both are
+ * invisible from the ladder above:
+ *   - A *new* worker version waiting behind the one still in control.
+ *     Push events are delivered to the ACTIVE worker; if that one is a
+ *     build without a `push` handler, the server sends, the browser
+ *     receives, and nothing is shown. The card flags a waiting update
+ *     and offers to apply it now.
+ *   - The server not actually being configured (env vars set after the
+ *     last deploy, or a mistyped subject): reported without echoing
+ *     any secret.
  */
 type Status =
   | 'loading'
@@ -47,17 +71,51 @@ type Status =
   | 'enabled'
   | 'disabled';
 
+interface ServerDiagnostics {
+  checkedAt: string;
+  server: {
+    configured: boolean;
+    publicKeyPresent: boolean;
+    privateKeyPresent: boolean;
+    subject: { present: boolean; valid: boolean; kind: string };
+    dispatchSecretPresent: boolean;
+  };
+  copy: { ok: boolean; locale: string; keys: number; error?: string };
+  account: { members: number; subscribedDevices: number; unreadConversations: number };
+  devices: { id: string; host: string; endpointSuffix: string; userAgent: string | null; createdAt: string; lastSeenAt: string }[];
+  devicesError: string | null;
+}
+
+interface ClientDiagnostics {
+  permission: NotificationPermission | 'unsupported';
+  standalone: boolean;
+  ios: boolean;
+  worker: WorkerInfo;
+  subscriptionHost: string | null;
+  subscriptionSuffix: string | null;
+  userAgent: string;
+}
+
+interface Diagnostics {
+  client: ClientDiagnostics;
+  server: ServerDiagnostics | { error: string };
+}
+
 export function PushNotificationsPanel() {
   const t = useTranslations('Settings.push');
   const [status, setStatus] = useState<Status>('loading');
   const [busy, setBusy] = useState(false);
   const [testing, setTesting] = useState(false);
+  const [worker, setWorker] = useState<WorkerInfo | null>(null);
+  const [diag, setDiag] = useState<Diagnostics | null>(null);
+  const [diagRunning, setDiagRunning] = useState(false);
 
   const refresh = useCallback(async () => {
     if (isIOS() && !isStandaloneDisplay()) return setStatus('ios_not_installed');
     if (!isPushSupported()) return setStatus('unsupported');
     if (!getVapidPublicKey()) return setStatus('not_configured');
     if (!(await getServiceWorkerRegistration())) return setStatus('no_worker');
+    setWorker(await getWorkerInfo());
     if (Notification.permission === 'denied') return setStatus('denied');
     setStatus((await getCurrentSubscription()) ? 'enabled' : 'disabled');
   }, []);
@@ -111,9 +169,92 @@ export function PushNotificationsPanel() {
     }
   };
 
+  const updateNow = async () => {
+    const applied = await applyWaitingUpdate();
+    if (!applied) {
+      toast.error(t('diagUpdateNone'));
+      return;
+    }
+    // The registration component reloads the page on controllerchange.
+    toast.success(t('diagUpdating'));
+  };
+
+  const runDiagnostics = async () => {
+    setDiagRunning(true);
+    try {
+      const subscription = isPushSupported() ? await getCurrentSubscription() : null;
+      let subscriptionHost: string | null = null;
+      if (subscription) {
+        try {
+          subscriptionHost = new URL(subscription.endpoint).host;
+        } catch {
+          subscriptionHost = 'unknown';
+        }
+      }
+      const client: ClientDiagnostics = {
+        permission: typeof Notification === 'undefined' ? 'unsupported' : Notification.permission,
+        standalone: isStandaloneDisplay(),
+        ios: isIOS(),
+        worker: await getWorkerInfo(),
+        subscriptionHost,
+        subscriptionSuffix: subscription ? subscription.endpoint.slice(-12) : null,
+        userAgent: navigator.userAgent,
+      };
+      setWorker(client.worker);
+
+      let server: Diagnostics['server'];
+      try {
+        const res = await fetch('/api/push/diagnostics');
+        const data = await res.json().catch(() => ({}));
+        server = res.ok ? (data as ServerDiagnostics) : { error: data.error ?? `HTTP ${res.status}` };
+      } catch (err) {
+        server = { error: err instanceof Error ? err.message : String(err) };
+      }
+      setDiag({ client, server });
+    } finally {
+      setDiagRunning(false);
+    }
+  };
+
+  const copyDiagnostics = async () => {
+    if (!diag) return;
+    try {
+      await navigator.clipboard.writeText(JSON.stringify(diag, null, 2));
+      toast.success(t('diagCopied'));
+    } catch {
+      toast.error(t('diagCopyFailed'));
+    }
+  };
+
+  const serverDiag = diag && !('error' in diag.server) ? diag.server : null;
+  const serverKnowsThisDevice =
+    !!serverDiag &&
+    !!diag?.client.subscriptionSuffix &&
+    serverDiag.devices.some((d) => d.endpointSuffix === diag.client.subscriptionSuffix);
+  const yes = t('diagYes');
+  const no = t('diagNo');
+  const workerLabel = (info: WorkerInfo | null) => {
+    if (!info || !info.registered) return t('diagWorkerNone');
+    if (!info.activeVersion) return t('diagWorkerOld');
+    return t('diagWorkerVersion', { version: info.activeVersion });
+  };
+
   return (
     <div className="space-y-6">
       <SettingsPanelHead title={t('title')} description={t('description')} />
+
+      {worker?.updateWaiting && (
+        <Card className="border-amber-500/30 bg-amber-500/5">
+          <CardContent className="flex flex-wrap items-center gap-3 pt-6">
+            <AlertTriangle className="h-5 w-5 shrink-0 text-amber-500" />
+            <p className="min-w-0 flex-1 text-sm text-foreground">{t('diagUpdateWaitingBody')}</p>
+            <Button size="sm" onClick={updateNow}>
+              <RefreshCw className="mr-2 h-4 w-4" />
+              {t('diagUpdateNow')}
+            </Button>
+          </CardContent>
+        </Card>
+      )}
 
       <Card className="border-border bg-card">
         <CardContent className="space-y-4 pt-6">
@@ -186,6 +327,68 @@ export function PushNotificationsPanel() {
         </CardContent>
       </Card>
 
+      {/* Diagnostics — everything needed to explain a missing push, copyable as JSON. */}
+      <Card className="border-border bg-card">
+        <CardContent className="space-y-4 pt-6">
+          <StatusBlock icon={Stethoscope} title={t('diagTitle')}>
+            <p className="text-sm text-muted-foreground">{t('diagDescription')}</p>
+            <div className="mt-3 flex flex-wrap gap-2">
+              <Button variant="outline" onClick={runDiagnostics} disabled={diagRunning}>
+                {diagRunning ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Stethoscope className="mr-2 h-4 w-4" />}
+                {t('diagRun')}
+              </Button>
+              {diag && (
+                <Button variant="ghost" onClick={copyDiagnostics}>
+                  <ClipboardCopy className="mr-2 h-4 w-4" />
+                  {t('diagCopy')}
+                </Button>
+              )}
+            </div>
+          </StatusBlock>
+
+          {diag && (
+            <dl className="grid gap-x-4 gap-y-2 text-sm sm:grid-cols-[minmax(0,1fr)_minmax(0,1.4fr)]">
+              <DiagRow label={t('diagPermission')} value={diag.client.permission} />
+              <DiagRow label={t('diagStandalone')} value={diag.client.standalone ? yes : no} />
+              <DiagRow label={t('diagWorker')} value={workerLabel(diag.client.worker)} warn={diag.client.worker.registered && !diag.client.worker.activeVersion} />
+              <DiagRow label={t('diagUpdateWaiting')} value={diag.client.worker.updateWaiting ? yes : no} warn={diag.client.worker.updateWaiting} />
+              <DiagRow
+                label={t('diagSubscription')}
+                value={diag.client.subscriptionHost ? `${diag.client.subscriptionHost} …${diag.client.subscriptionSuffix}` : t('diagSubscriptionNone')}
+                warn={!diag.client.subscriptionHost}
+              />
+              {serverDiag ? (
+                <>
+                  <DiagRow label={t('diagServerKnows')} value={serverKnowsThisDevice ? yes : no} warn={!!diag.client.subscriptionHost && !serverKnowsThisDevice} />
+                  <DiagRow label={t('diagServerConfig')} value={serverDiag.server.configured ? yes : no} warn={!serverDiag.server.configured} />
+                  <DiagRow
+                    label={t('diagServerSubject')}
+                    value={serverDiag.server.subject.present ? `${serverDiag.server.subject.kind} · ${serverDiag.server.subject.valid ? yes : no}` : no}
+                    warn={!serverDiag.server.subject.valid}
+                  />
+                  <DiagRow label={t('diagServerSecret')} value={serverDiag.server.dispatchSecretPresent ? yes : no} />
+                  <DiagRow
+                    label={t('diagServerCopy')}
+                    value={serverDiag.copy.ok ? `${serverDiag.copy.locale} (${serverDiag.copy.keys})` : (serverDiag.copy.error ?? no)}
+                    warn={!serverDiag.copy.ok}
+                  />
+                  <DiagRow
+                    label={t('diagAccount')}
+                    value={t('diagAccountValue', {
+                      members: serverDiag.account.members,
+                      devices: serverDiag.account.subscribedDevices,
+                      unread: serverDiag.account.unreadConversations,
+                    })}
+                  />
+                </>
+              ) : (
+                <DiagRow label={t('diagServerConfig')} value={'error' in diag.server ? diag.server.error : no} warn />
+              )}
+            </dl>
+          )}
+        </CardContent>
+      </Card>
+
       <Card className="border-border bg-card">
         <CardContent className="space-y-2 pt-6 text-sm text-muted-foreground">
           <p className="font-medium text-foreground">{t('whatTitle')}</p>
@@ -199,6 +402,15 @@ export function PushNotificationsPanel() {
         </CardContent>
       </Card>
     </div>
+  );
+}
+
+function DiagRow({ label, value, warn = false }: { label: string; value: string; warn?: boolean }) {
+  return (
+    <>
+      <dt className="text-muted-foreground">{label}</dt>
+      <dd className={warn ? 'font-medium text-amber-500' : 'text-foreground'}>{value}</dd>
+    </>
   );
 }
 

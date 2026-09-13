@@ -241,6 +241,13 @@ describe("sw.js — activate", () => {
 });
 
 describe("sw.js — message", () => {
+  it("answers GET_VERSION on the message port with the cache version", () => {
+    const port = { postMessage: vi.fn() };
+    sandbox.handlers.message({ data: { type: "GET_VERSION" }, ports: [port] });
+    expect(port.postMessage).toHaveBeenCalledWith({ type: "VERSION", version: "v2" });
+    expect(sandbox.skipWaiting).not.toHaveBeenCalled();
+  });
+
   it("skips waiting only for SKIP_WAITING", () => {
     sandbox.handlers.message({ data: { type: "SOMETHING_ELSE" } });
     sandbox.handlers.message({ data: null });

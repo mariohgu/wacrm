@@ -80,8 +80,20 @@ self.addEventListener("activate", (event) => {
 });
 
 self.addEventListener("message", (event) => {
-  if (event.data && event.data.type === "SKIP_WAITING") {
+  const data = event.data;
+  if (!data) return;
+  if (data.type === "SKIP_WAITING") {
     self.skipWaiting();
+    return;
+  }
+  // Diagnostics: the Settings panel asks the ACTIVE worker its version
+  // to detect a stale build still in control (one without a push
+  // handler stays silent when a push arrives). Reply over the port the
+  // page sent, falling back to the client itself.
+  if (data.type === "GET_VERSION") {
+    const reply = { type: "VERSION", version: VERSION };
+    if (event.ports && event.ports[0]) event.ports[0].postMessage(reply);
+    else if (event.source && typeof event.source.postMessage === "function") event.source.postMessage(reply);
   }
 });
 

@@ -141,3 +141,66 @@ export function urlBase64ToUint8Array(base64String: string): Uint8Array<ArrayBuf
   for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i)
   return bytes
 }
+
+/** What the Settings diagnostics card shows about the service worker. */
+export interface WorkerInfo {
+  registered: boolean
+  activeScript: string | null
+  /**
+   * The active worker's VERSION constant (see sw.js), asked over a
+   * MessageChannel. `null` when it doesn't answer within 1.5s — which is
+   * exactly what a stale build without the GET_VERSION handler does, so
+   * "registered but no version" reads as "old worker still in control".
+   */
+  activeVersion: string | null
+  /** A newer build is installed and waiting for SKIP_WAITING. */
+  updateWaiting: boolean
+  /** This page is controlled by a worker (false on a very first load). */
+  controlling: boolean
+}
+
+export async function getWorkerInfo(): Promise<WorkerInfo> {
+  const registration = await getServiceWorkerRegistration()
+  if (!registration) {
+    return { registered: false, activeScript: null, activeVersion: null, updateWaiting: false, controlling: false }
+  }
+  const active = registration.active
+  return {
+    registered: true,
+    activeScript: active?.scriptURL ?? null,
+    activeVersion: active ? await askWorkerVersion(active) : null,
+    updateWaiting: !!registration.waiting,
+    controlling: !!navigator.serviceWorker.controller,
+  }
+}
+
+function askWorkerVersion(worker: ServiceWorker): Promise<string | null> {
+  return new Promise((resolve) => {
+    const channel = new MessageChannel()
+    const timer = setTimeout(() => resolve(null), 1500)
+    channel.port1.onmessage = (event) => {
+      clearTimeout(timer)
+      const version = (event.data as { version?: unknown } | null)?.version
+      resolve(typeof version === 'string' ? version : null)
+    }
+    try {
+      worker.postMessage({ type: 'GET_VERSION' }, [channel.port2])
+    } catch {
+      clearTimeout(timer)
+      resolve(null)
+    }
+  })
+}
+
+/**
+ * Tell a waiting (newer) worker to take over. The registration
+ * component reloads the page on the resulting `controllerchange`.
+ * Returns false when nothing is waiting.
+ */
+export async function applyWaitingUpdate(): Promise<boolean> {
+  const registration = await getServiceWorkerRegistration()
+  const waiting = registration?.waiting
+  if (!waiting) return false
+  waiting.postMessage({ type: 'SKIP_WAITING' })
+  return true
+}

@@ -63,6 +63,45 @@ export function isPushConfigured(): boolean {
   return !!(process.env.NEXT_PUBLIC_VAPID_PUBLIC_KEY && process.env.VAPID_PRIVATE_KEY)
 }
 
+export interface PushServerStatus {
+  configured: boolean
+  publicKeyPresent: boolean
+  privateKeyPresent: boolean
+  /** web-push refuses to sign unless the subject is a mailto: or https: URL. */
+  subject: { present: boolean; valid: boolean; kind: 'mailto' | 'https' | 'invalid' | 'missing' }
+  dispatchSecretPresent: boolean
+}
+
+/**
+ * Presence/format of the server-side configuration, for the Settings
+ * diagnostics card. Never echoes a value — only whether each env var
+ * is set and, for the subject, whether web-push would accept it.
+ */
+export function getPushServerStatus(): PushServerStatus {
+  const subjectRaw = process.env.VAPID_SUBJECT
+  let subject: PushServerStatus['subject']
+  if (!subjectRaw) {
+    subject = { present: false, valid: false, kind: 'missing' }
+  } else {
+    let kind: PushServerStatus['subject']['kind'] = 'invalid'
+    try {
+      const protocol = new URL(subjectRaw).protocol
+      if (protocol === 'mailto:') kind = 'mailto'
+      else if (protocol === 'https:') kind = 'https'
+    } catch {
+      kind = 'invalid'
+    }
+    subject = { present: true, valid: kind !== 'invalid', kind }
+  }
+  return {
+    configured: isPushConfigured(),
+    publicKeyPresent: !!process.env.NEXT_PUBLIC_VAPID_PUBLIC_KEY,
+    privateKeyPresent: !!process.env.VAPID_PRIVATE_KEY,
+    subject,
+    dispatchSecretPresent: !!process.env.PUSH_DISPATCH_SECRET,
+  }
+}
+
 let vapidReady = false
 function ensureVapid(): boolean {
   if (vapidReady) return true
@@ -144,7 +183,14 @@ export async function sendPushToUsers(
     }
 
     const rows = (data ?? []) as SubscriptionRow[]
-    if (rows.length === 0) return result
+    if (rows.length === 0) {
+      // The most common "nothing arrived": nobody on the recipient list
+      // has enabled push on any device yet.
+      console.warn(
+        `[push] no subscriptions: account=${args.accountId} recipients=${userIds.length} type=${args.payload.type}`,
+      )
+      return result
+    }
 
     const body = JSON.stringify(args.payload)
     const stale: string[] = []
@@ -192,6 +238,9 @@ export async function sendPushToUsers(
         result.pruned = stale.length
       }
     }
+    console.log(
+      `[push] delivered: account=${args.accountId} type=${args.payload.type} recipients=${userIds.length} subscriptions=${rows.length} sent=${result.sent} failed=${result.failed} pruned=${result.pruned}`,
+    )
   } catch (err) {
     console.error('[push] unexpected failure:', err)
   }
