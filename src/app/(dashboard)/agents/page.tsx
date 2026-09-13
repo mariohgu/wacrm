@@ -5,6 +5,7 @@ import { Bot, Sparkles, Settings2, BarChart3 } from 'lucide-react';
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs';
 import { AiPlayground } from '@/components/agents/ai-playground';
 import { AiUsageCard } from '@/components/agents/ai-usage';
+import { AiReplyActivityCard } from '@/components/agents/ai-reply-activity';
 import { AiConfig } from '@/components/settings/ai-config';
 import { useAuth } from '@/hooks/use-auth';
 import { canEditSettings } from '@/lib/auth/roles';
@@ -78,7 +79,8 @@ export default function AgentsPage() {
           </TabsContent>
 
           {canViewUsage && (
-            <TabsContent value="usage" className="mt-4">
+            <TabsContent value="usage" className="mt-4 space-y-4">
+              <AiReplyActivityCard />
               <AiUsageCard />
             </TabsContent>
           )}

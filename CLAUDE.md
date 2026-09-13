@@ -200,6 +200,53 @@ the handoff bookkeeping (`ai_autoreply_disabled`, `ai_handoff_summary`)
 below it. Before this, the handoff branch discarded any model text
 outright and the customer got silence.
 
+### Auto-reply diagnostics (`ai_reply_events`)
+
+`dispatchInboundToAiReply` (`auto-reply.ts`) has ~a dozen exit paths,
+and until 2026-09-13 every one of them was a silent `return` — the inbox
+banner kept saying "AI is replying automatically" while the bot had
+actually stopped. Now the dispatcher is split in two: `runAutoReply`
+does the work and returns an `AutoReplyAttempt` (`{outcome, reason,
+detail}`), and `dispatchInboundToAiReply` writes that to
+`ai_reply_events` (migration 040) via `reply-events.ts`'s
+`logAiReplyEvent` (never throws — audit failure must not affect the
+reply). One row per inbound message the bot was asked to handle, **only
+once the account-level gate passes** (no config / `auto_reply_enabled`
+off writes nothing — the account isn't using the bot).
+
+- `outcome` ∈ `replied | handoff | skipped | failed`; `reason` is the
+  closed `AiReplyReason` union in code (so the UI can translate every
+  code — `AiReplyEvents.reasons.*` in `messages/*.json`) but free text
+  in the DB (a new code never needs a migration). `detail` carries the
+  failure message (an `AiError`'s `code: message`, e.g.
+  `rate_limited: OpenRouter rate limit reached: …`; `cap_reached`
+  stores `used/max`).
+- **The most common "bot went quiet" cause is `cap_reached`**:
+  `conversations.ai_reply_count` is a *lifetime* counter per
+  conversation (default cap 3, max 20 — `auto_reply_max_per_conversation`),
+  and this CRM reuses one conversation per contact forever, so once a
+  contact has received the cap's worth of bot replies the bot never
+  answers them again. The only reset is "Resume AI" in the inbox banner
+  (`POST /api/ai/autoreply/[conversationId]` with `paused:false` sets
+  `ai_reply_count = 0`). Nothing resets it on conversation close/reopen
+  or after the 24h window — a deliberate upstream cost cap, flagged to
+  the user as a product decision, not changed.
+- Read surfaces: `GET /api/ai/autoreply/[conversationId]` (viewer+;
+  `reply_count`/`max_replies`/`cap_reached` + `last_event`) feeds
+  `ai-thread-banner.tsx`, which now has a third state — amber
+  "reached its reply limit (3/3)" + Resume — and, in the active state,
+  shows a `used/max` counter plus a "last attempt failed/skipped:
+  <reason> — <detail>" line for non-self-evident outcomes. It also
+  subscribes to realtime INSERTs on `ai_reply_events` (table added to
+  `supabase_realtime` in migration 040) so a failure appears the moment
+  it happens. `GET /api/ai/autoreply/events` (admin+) feeds the
+  `AiReplyActivityCard` on Agents → Usage: tally by outcome/reason over
+  7 days + the 50 most recent attempts with contact name.
+- RLS: SELECT for any account member (`is_account_member(account_id)`,
+  no role floor — unlike `ai_usage_log`'s admin+, these rows carry no
+  billing/credential data); no `authenticated` write policies, the
+  webhook's service-role client is the only writer.
+
 ## Automations builder (`src/components/automations/automation-builder.tsx`)
 
 One 1700+ line file, no external flow library (that's the *separate*
@@ -1577,3 +1624,105 @@ verified in the real app — manual recommended: open a conversation and
 confirm the two rows, then reinstall the PWA on a phone to pick up the
 new icon and name (an already-installed home-screen shortcut keeps the
 old icon until it is removed and re-added).
+
+## 2026-09-13 — Explain why the AI auto-reply went quiet (`ai_reply_events`)
+
+User reported (with a screenshot) that the assistant sometimes stops
+answering — one AI reply in a thread, then four unanswered customer
+messages ("Para hoy, tienen citas?", "Tienen?", "Y ya no contestan",
+"Hola") under a banner still reading "El asistente de IA está
+respondiendo automáticamente" — and asked whether it's OpenRouter or
+the system, and whether the app could tell them. See the new
+**Auto-reply diagnostics** section above for the durable design.
+
+Diagnosis from code (no server logs or DB access this session):
+`dispatchInboundToAiReply` had ~12 exit paths and every one was a
+silent `return`; only provider/claim failures reached `console.error`
+(Vercel logs, not the UI), and none of the skips were logged anywhere.
+The single most likely cause of the screenshot is the
+**per-conversation reply cap**: `ai_reply_count` is a lifetime counter
+per conversation (default 3), this CRM keeps one conversation per
+contact forever, and the only reset is the banner's "Resume AI". The
+banner, however, only knew about `ai_autoreply_disabled` (handoff /
+take-over) — a capped thread looked identical to a live one. Other
+candidates that were equally invisible: the account-wide 30/min burst
+limit, an active `new_message_received`/`keyword_match` automation
+(the bot stands down for it), an OpenRouter error (402 no credits, 429,
+timeout, empty response), and a WhatsApp send error after the model
+answered. All of these now leave a row.
+
+Touched:
+
+- [supabase/migrations/040_ai_reply_events.sql](supabase/migrations/040_ai_reply_events.sql)
+  — **new migration, must be applied**: `ai_reply_events` table
+  (account/conversation/message ids, `outcome`, `reason`, `detail`),
+  two indexes, member-read RLS, service-role-only writes, added to the
+  `supabase_realtime` publication.
+- [src/lib/ai/reply-events.ts](src/lib/ai/reply-events.ts) — new:
+  `AiReplyOutcome`/`AiReplyReason` unions, `logAiReplyEvent` (never
+  throws, truncates `detail` to 500 chars), `describeError` (keeps an
+  `AiError`'s `code` as a prefix so "rate_limited" vs "invalid_key" vs
+  "timeout" is one glance).
+- [src/lib/ai/auto-reply.ts](src/lib/ai/auto-reply.ts) — split into
+  `runAutoReply` (returns an `AutoReplyAttempt`) + the dispatcher that
+  logs it. Every former bare `return` now names its reason;
+  `generateReply` and the final `engineSendText` each got their own
+  try/catch so `provider_error` and `send_error` are distinguishable
+  from `unknown_error`. `DispatchArgs` gained optional
+  `inboundMessageId`, threaded from the webhook's message upsert.
+- [src/app/api/ai/autoreply/[conversationId]/route.ts](<src/app/api/ai/autoreply/[conversationId]/route.ts>)
+  — new `GET` (viewer+): reply count vs cap + latest event for the
+  thread. `POST` unchanged.
+- [src/app/api/ai/autoreply/events/route.ts](src/app/api/ai/autoreply/events/route.ts)
+  — new `GET` (admin+): account feed + tally by outcome/reason.
+- [src/components/inbox/ai-thread-banner.tsx](src/components/inbox/ai-thread-banner.tsx)
+  — new amber "reached its reply limit (n/max)" state with Resume;
+  active state shows the `used/max` counter and a "last attempt
+  failed/skipped: reason — detail" line; realtime subscription on
+  `ai_reply_events` for the open thread. [message-thread.tsx](src/components/inbox/message-thread.tsx)
+  passes `conversation.ai_reply_count` so the counter tracks the
+  realtime conversation UPDATE.
+- [src/components/agents/ai-reply-activity.tsx](src/components/agents/ai-reply-activity.tsx)
+  — new card, rendered above the token-usage card on Agents → Usage
+  ([agents/page.tsx](<src/app/(dashboard)/agents/page.tsx>)).
+- `messages/en.json`, `es.json`, `ko.json` — new `Inbox.aiBanner.*`
+  keys (counter, cap state, last-attempt lines) and a new top-level
+  `AiReplyEvents` namespace (card copy + one label per outcome and per
+  reason code). The JSON rewrite also normalised a few pre-existing
+  whitespace-only irregularities (blank lines with trailing spaces,
+  mis-indented keys) — no string values changed.
+- Tests: new `reply-events.test.ts`; `auto-reply.test.ts` gained an
+  `ai_reply_events` branch in the admin-client mock plus a new describe
+  block asserting the exact row for every outcome (sent, cap_reached
+  with `3/3`, human_assigned/paused/automation_active/no_context,
+  cap_race, provider_error with the AiError code, send_error,
+  config_error, unknown_error, handoff with a failed farewell) and that
+  an account with no auto-reply writes nothing.
+
+**Deliberately not changed — the cap semantics.** Making
+`ai_reply_count` reset on conversation reopen / after the 24h WhatsApp
+window would stop the reported symptom at its source, but it's a
+product decision on the upstream template's cost cap (a runaway bot
+could otherwise burn the BYO key indefinitely with one chatty
+customer). Left as a recommendation: raise `Max auto-replies per
+conversation` (Agents → Setup, up to 20) and/or decide on a reset rule
+in a follow-up.
+
+Verified: `npx tsc --noEmit` clean; `npx eslint` on every touched file
+(0 errors, 2 pre-existing warnings on untouched lines of
+`message-thread.tsx`); `npx vitest run src/i18n/messages.test.ts`
+(4/4); `npx vitest run` on the three touched test files (56 passing);
+full `npx vitest run` (914/916 — only the same pre-existing, unrelated
+`date-utils.test.ts` `mondayIndex` timezone failures); `next build`
+succeeds. Not verified in-browser (no Supabase login this session) —
+manual recommended: apply the migration, open the "Mario Figueroa"
+thread and confirm the banner now reads the amber "límite alcanzado
+(n/3)" state (or, if not capped, that the counter and last-attempt line
+render), press "Reanudar IA", send a test message as the customer, and
+watch Agents → Usage → "Actividad de respuestas automáticas" fill in.
+
+> **Migration required for self-hosters:** apply
+> `supabase/migrations/040_ai_reply_events.sql`. Until it is applied,
+> the auto-reply still works exactly as before — `logAiReplyEvent`
+> swallows the missing-table error — but the banner shows no counter /
+> last-attempt line and the activity card stays empty.

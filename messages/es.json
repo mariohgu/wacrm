@@ -296,7 +296,12 @@
       "tookOver": "Has tomado el control de este chat.",
       "resumed": "IA reanudada.",
       "updateError": "No se pudo actualizar el asistente de IA.",
-      "networkError": "No se pudo conectar con el servidor."
+      "networkError": "No se pudo conectar con el servidor.",
+      "replyCounter": "{count}/{max} respuestas",
+      "capReachedTitle": "El asistente de IA alcanzó su límite de respuestas en este chat ({count}/{max})",
+      "capReachedHint": "Reanuda la IA para darle un nuevo cupo de respuestas, o sube el límite en Agentes → Configuración.",
+      "lastAttemptFailed": "El último intento de respuesta de la IA falló",
+      "lastAttemptSkipped": "El último intento de respuesta de la IA se omitió"
     }
   },
   "Contacts": {
@@ -389,9 +394,9 @@
         "custom": "Campos personalizados",
         "deals": "Tratos",
         "tags": "Etiquetas",
-      "noTags": "Sin etiquetas",
-      "noDeals": "Sin tratos",
-      "addNotePlaceholder": "Añadir una nota..."
+        "noTags": "Sin etiquetas",
+        "noDeals": "Sin tratos",
+        "addNotePlaceholder": "Añadir una nota..."
       },
       "actions": {
         "edit": "Editar",
@@ -1401,13 +1406,11 @@
       "deleteLocallyAria": "Eliminar plantilla localmente",
       "deleteMetaLocallyTitle": "Eliminar de Meta y localmente",
       "deleteLocallyTitle": "Eliminar localmente",
-
       "dialogEditTitle": "Editar plantilla de mensaje",
       "dialogNewTitle": "Nueva plantilla de mensaje",
       "dialogEditDesc": "Guarda tus cambios para volver a enviarlos a Meta. El estado volverá a PENDIENTE durante la revisión.",
       "dialogNewDesc": "Crea una plantilla y envíala a Meta para su aprobación. Una vez aprobada, podrás usarla en difusiones y en la bandeja de entrada.",
       "authWarning": "Las plantillas de AUTHENTICATION tienen una forma fija de cuerpo + botón OTP que necesita un creador distinto. Créalas por ahora en Meta WhatsApp Manager y usa <bold>Sincronizar desde Meta</bold> para traerlas.",
-
       "templateName": "Nombre de la plantilla",
       "namePlaceholder": "p. ej. confirmacion_pedido",
       "nameFixed": "El nombre queda fijo una vez que la plantilla existe en Meta — crea una nueva plantilla para cambiarlo.",
@@ -1416,7 +1419,6 @@
       "language": "Idioma",
       "langFixed": "El idioma queda fijo una vez que la plantilla existe en Meta.",
       "langHint": "Debe coincidir exactamente con el código de Meta — <code>en_US</code> y <code>en</code> son distintos.",
-
       "header": "Encabezado",
       "headerNone": "Ninguno",
       "headerText": "Texto",
@@ -1426,7 +1428,6 @@
       "headerTextPlaceholder": "Texto del encabezado (máx. 60 caracteres, {{1}} opcional)",
       "headerSampleAria": "Valor de ejemplo para la variable del encabezado",
       "headerSamplePlaceholder": "Valor de ejemplo para {{1}} (requerido para la revisión de Meta)",
-
       "uploadImage": "Subir imagen",
       "uploadHint": "JPEG o PNG, ≤5 MB",
       "mediaUrlPlaceholder": "https://… (o pega un enlace público de {format})",
@@ -1434,17 +1435,14 @@
       "mediaHint": "Debe ser un enlace HTTPS de acceso público. Meta lo recupera una vez durante la revisión, así que debe permanecer activo unas ~24 horas.",
       "videoHint": " Recomendado: MP4 / 3GPP, ≤16 MB, ≤60 segundos.",
       "documentHint": " Recomendado: PDF, ≤100 MB.",
-
       "bodyText": "Texto del cuerpo",
       "bodyPlaceholder": "Hola {{1}}, tu pedido {{2}} está confirmado.",
       "bodyHint": "Usa {{1}}, {{2}} para variables (deben ser contiguas empezando en {{1}}).",
       "sampleValues": "Valores de ejemplo (Meta los usa para revisar tu plantilla)",
       "sampleAria": "Valor de ejemplo para la variable del cuerpo {var}",
       "samplePlaceholder": "Ejemplo para {var}",
-
       "footer": "Pie de página (opcional)",
       "footerPlaceholder": "Texto de pie de página opcional (máx. 60 caracteres)",
-
       "buttons": "Botones (opcional)",
       "addButton": "Añadir botón",
       "buttonsLimit": "Hasta {max} botones. Los botones QUICK_REPLY deben ir antes que los de URL / teléfono / código de copia.",
@@ -1457,19 +1455,16 @@
       "urlSamplePlaceholder": "Valor de ejemplo para {{1}} (requerido cuando la URL tiene una variable)",
       "phonePlaceholder": "+15551234567",
       "codePlaceholder": "Código de ejemplo (p. ej. VERANO20)",
-
       "cancel": "Cancelar",
       "saving": "Guardando…",
       "submitting": "Enviando…",
       "saveResubmit": "Guardar y reenviar",
       "submitApproval": "Enviar para aprobación",
-
       "deleteDialogTitle": "¿Eliminar plantilla?",
       "deleteMetaDesc": "\"{name}\" se eliminará de Meta y de MlennyChatBot. Las difusiones activas que usen esta plantilla empezarán a fallar en su próximo envío. Esto no se puede deshacer.",
       "deleteLocalDesc": "\"{name}\" se eliminará de MlennyChatBot. Nunca se envió a Meta, así que no se necesita limpieza remota.",
       "deleting": "Eliminando…",
       "delete": "Eliminar",
-
       "toastLoadFailed": "Error al cargar las plantillas",
       "toastSubmitFailed": "Error al enviar",
       "toastSubmitEditSuccess": "Edición enviada — Meta suele revisar en un plazo de 24 horas.",
@@ -1616,7 +1611,6 @@
       "profileSaved": "Perfil guardado",
       "emailChangeFailed": "Error al cambiar el correo electrónico: {message}",
       "profileSavedEmailCheck": "Perfil guardado — revisa tu correo electrónico para confirmar el cambio de dirección",
-
       "passwordTitle": "Contraseña",
       "passwordDesc": "Usa al menos {min} caracteres. Permanecerás conectado en este dispositivo después de cambiarla.",
       "currentPassword": "Contraseña actual",
@@ -1630,7 +1624,6 @@
       "currentPasswordIncorrect": "La contraseña actual es incorrecta",
       "passwordUpdateFailed": "Error al actualizar la contraseña: {message}",
       "passwordUpdated": "Contraseña actualizada",
-
       "sessionsTitle": "Sesiones activas",
       "sessionsDesc": "Cierra sesión en todos los dispositivos donde estés conectado, incluido este. Útil si perdiste un portátil o compartiste tu contraseña.",
       "signOutAll": "Cerrar sesión en todos los dispositivos",
@@ -1811,6 +1804,40 @@
       "reindex": "Reindexar",
       "reindexTooltip": "Vuelve a generar embeddings de todos los documentos (p. ej. después de añadir una clave de embeddings)",
       "loading": "Cargando…"
+    }
+  },
+  "AiReplyEvents": {
+    "title": "Actividad de respuestas automáticas",
+    "description": "Cada mensaje entrante que el asistente debía responder y qué pasó: aquí se ve por qué el bot se quedó callado.",
+    "empty": "Sin actividad de respuestas automáticas en los últimos {days} días.",
+    "emptyHint": "Aquí aparecen filas a medida que los clientes escriben con la respuesta automática activa.",
+    "byReason": "Por resultado",
+    "recent": "Intentos recientes",
+    "unknownContact": "Contacto desconocido",
+    "loadError": "No se pudo cargar la actividad de respuestas automáticas",
+    "truncated": "Se muestran solo los intentos más recientes.",
+    "outcomes": {
+      "replied": "Respondió",
+      "handoff": "Derivó a humano",
+      "skipped": "Omitido",
+      "failed": "Falló"
+    },
+    "reasons": {
+      "sent": "Respuesta enviada",
+      "handoff": "Derivado a una persona del equipo",
+      "automation_active": "Una automatización activa responde los mensajes en su lugar",
+      "conversation_missing": "Conversación no encontrada",
+      "human_assigned": "Un integrante del equipo está asignado a este chat",
+      "paused": "La IA está pausada en este chat",
+      "cap_reached": "Se alcanzó el límite de respuestas de esta conversación",
+      "no_context": "No hay texto al que responder",
+      "account_rate_limited": "Se alcanzó el límite de ráfaga de la cuenta — reintenta en un minuto",
+      "cap_race": "Límite de respuestas alcanzado (mensajes simultáneos)",
+      "config_error": "No se pudo cargar la configuración de IA (revisa ENCRYPTION_KEY)",
+      "provider_error": "El proveedor de IA devolvió un error",
+      "claim_error": "Error de base de datos al reservar un cupo de respuesta (¿falta la migración?)",
+      "send_error": "La respuesta no se pudo enviar por WhatsApp",
+      "unknown_error": "Error inesperado"
     }
   }
 }

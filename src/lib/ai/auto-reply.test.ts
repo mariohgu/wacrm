@@ -15,6 +15,9 @@ const h = vi.hoisted(() => ({
     claim: true as boolean,
     updatePayload: null as Record<string, unknown> | null,
     rpcCalls: [] as { name: string; args: unknown }[],
+    // Rows written to `ai_reply_events` — one per dispatch that got past
+    // the account-level gate.
+    events: [] as Record<string, unknown>[],
   },
 }))
 
@@ -42,6 +45,14 @@ vi.mock('./admin-client', () => ({
             Promise.resolve({ data: h.state.autoResponders, error: null }),
         }
         return chain
+      }
+      if (table === 'ai_reply_events') {
+        return {
+          insert: (row: Record<string, unknown>) => {
+            h.state.events.push(row)
+            return Promise.resolve({ error: null })
+          },
+        }
       }
       // conversations
       return {
@@ -98,6 +109,7 @@ beforeEach(() => {
   h.state.claim = true
   h.state.updatePayload = null
   h.state.rpcCalls = []
+  h.state.events = []
   h.loadAiConfig.mockResolvedValue(aiConfig())
   h.buildConversationContext.mockResolvedValue([{ role: 'user', content: 'hi' }])
   h.buildCustomerContext.mockResolvedValue({
@@ -275,5 +287,142 @@ describe('dispatchInboundToAiReply — handoff', () => {
     })
     await dispatchInboundToAiReply(ARGS)
     expect(h.state.updatePayload).toMatchObject({ ai_autoreply_disabled: true })
+    expect(h.state.events).toHaveLength(1)
+    expect(h.state.events[0]).toMatchObject({
+      outcome: 'handoff',
+      reason: 'handoff',
+    })
+    expect(h.state.events[0].detail).toContain('WhatsApp API down')
+  })
+})
+
+describe('dispatchInboundToAiReply — ai_reply_events audit trail', () => {
+  const event = () => {
+    expect(h.state.events).toHaveLength(1)
+    return h.state.events[0]
+  }
+
+  it('records a replied/sent event carrying the inbound message id', async () => {
+    await dispatchInboundToAiReply({ ...ARGS, inboundMessageId: 'msg-42' })
+    expect(event()).toMatchObject({
+      account_id: 'acct-1',
+      conversation_id: 'conv-1',
+      message_id: 'msg-42',
+      outcome: 'replied',
+      reason: 'sent',
+      detail: null,
+    })
+  })
+
+  it('writes nothing when the account has no auto-reply at all', async () => {
+    h.loadAiConfig.mockResolvedValue(null)
+    await dispatchInboundToAiReply(ARGS)
+    expect(h.state.events).toHaveLength(0)
+
+    h.loadAiConfig.mockResolvedValue(aiConfig({ autoReplyEnabled: false }))
+    await dispatchInboundToAiReply(ARGS)
+    expect(h.state.events).toHaveLength(0)
+  })
+
+  it('records cap_reached with the count vs cap', async () => {
+    h.state.conv = {
+      assigned_agent_id: null,
+      ai_autoreply_disabled: false,
+      ai_reply_count: 3,
+    }
+    await dispatchInboundToAiReply(ARGS)
+    expect(event()).toMatchObject({
+      outcome: 'skipped',
+      reason: 'cap_reached',
+      detail: '3/3',
+    })
+  })
+
+  it('records human_assigned / paused / automation_active / no_context skips', async () => {
+    h.state.conv = {
+      assigned_agent_id: 'agent-9',
+      ai_autoreply_disabled: false,
+      ai_reply_count: 0,
+    }
+    await dispatchInboundToAiReply(ARGS)
+    expect(event()).toMatchObject({ outcome: 'skipped', reason: 'human_assigned' })
+
+    h.state.events = []
+    h.state.conv = {
+      assigned_agent_id: null,
+      ai_autoreply_disabled: true,
+      ai_reply_count: 0,
+    }
+    await dispatchInboundToAiReply(ARGS)
+    expect(event()).toMatchObject({ outcome: 'skipped', reason: 'paused' })
+
+    h.state.events = []
+    h.state.conv = {
+      assigned_agent_id: null,
+      ai_autoreply_disabled: false,
+      ai_reply_count: 0,
+    }
+    h.state.autoResponders = [{ id: 'auto-1' }]
+    await dispatchInboundToAiReply(ARGS)
+    expect(event()).toMatchObject({
+      outcome: 'skipped',
+      reason: 'automation_active',
+    })
+
+    h.state.events = []
+    h.state.autoResponders = []
+    h.buildConversationContext.mockResolvedValue([])
+    await dispatchInboundToAiReply(ARGS)
+    expect(event()).toMatchObject({ outcome: 'skipped', reason: 'no_context' })
+  })
+
+  it('records cap_race when the atomic claim loses', async () => {
+    h.state.claim = false
+    await dispatchInboundToAiReply(ARGS)
+    expect(event()).toMatchObject({ outcome: 'skipped', reason: 'cap_race' })
+  })
+
+  it('records a provider failure with the AiError code and message', async () => {
+    const { AiError } = await import('./types')
+    h.generateReply.mockRejectedValue(
+      new AiError('OpenRouter rate limit reached: insufficient credits', {
+        code: 'rate_limited',
+        status: 502,
+      }),
+    )
+    await dispatchInboundToAiReply(ARGS)
+    expect(h.engineSendText).not.toHaveBeenCalled()
+    expect(event()).toMatchObject({
+      outcome: 'failed',
+      reason: 'provider_error',
+      detail:
+        'rate_limited: OpenRouter rate limit reached: insufficient credits',
+    })
+  })
+
+  it('records a send failure after the model answered', async () => {
+    h.engineSendText.mockRejectedValue(
+      new Error('contact phone invalid: Invalid phone number format'),
+    )
+    await dispatchInboundToAiReply(ARGS)
+    expect(event()).toMatchObject({ outcome: 'failed', reason: 'send_error' })
+    expect(event().detail).toContain('Invalid phone number format')
+  })
+
+  it('records a config failure when the stored key cannot be decrypted', async () => {
+    h.loadAiConfig.mockRejectedValue(new Error('Unsupported state or unable to authenticate data'))
+    await dispatchInboundToAiReply(ARGS)
+    expect(h.generateReply).not.toHaveBeenCalled()
+    expect(event()).toMatchObject({ outcome: 'failed', reason: 'config_error' })
+  })
+
+  it('maps an unexpected throw to unknown_error and never rejects', async () => {
+    h.buildCustomerContext.mockRejectedValue(new Error('db exploded'))
+    await expect(dispatchInboundToAiReply(ARGS)).resolves.toBeUndefined()
+    expect(event()).toMatchObject({
+      outcome: 'failed',
+      reason: 'unknown_error',
+      detail: 'db exploded',
+    })
   })
 })

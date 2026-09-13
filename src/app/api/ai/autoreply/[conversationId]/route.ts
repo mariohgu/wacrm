@@ -1,8 +1,80 @@
 import { NextResponse } from 'next/server'
 import { requireRole, toErrorResponse } from '@/lib/auth/account'
 import { checkRateLimit, rateLimitResponse, RATE_LIMITS } from '@/lib/rate-limit'
+import type { AiReplyEventRow } from '@/lib/ai/reply-events'
 
 type Params = { params: Promise<{ conversationId: string }> }
+
+/**
+ * GET /api/ai/autoreply/[conversationId]  (viewer+)
+ *
+ * Per-thread auto-reply status for the inbox banner: how many replies
+ * the bot has used against the account's per-conversation cap, and the
+ * latest `ai_reply_events` row (what happened the last time a customer
+ * message came in — replied / skipped / failed and why). This is what
+ * turns "AI is replying automatically" into "AI hit its 3/3 limit" or
+ * "last attempt failed: OpenRouter 402".
+ *
+ * Reads go through the RLS-scoped SSR client (`ai_reply_events` and
+ * `ai_configs` are both member-readable), so a conversation outside the
+ * caller's account is a 404.
+ */
+export async function GET(_request: Request, { params }: Params) {
+  try {
+    const { supabase, accountId } = await requireRole('viewer')
+    const { conversationId } = await params
+
+    const [convRes, configRes, eventRes] = await Promise.all([
+      supabase
+        .from('conversations')
+        .select('id, ai_reply_count, ai_autoreply_disabled')
+        .eq('id', conversationId)
+        .eq('account_id', accountId)
+        .maybeSingle(),
+      supabase
+        .from('ai_configs')
+        .select('auto_reply_max_per_conversation')
+        .eq('account_id', accountId)
+        .maybeSingle(),
+      supabase
+        .from('ai_reply_events')
+        .select('id, conversation_id, message_id, outcome, reason, detail, created_at')
+        .eq('account_id', accountId)
+        .eq('conversation_id', conversationId)
+        .order('created_at', { ascending: false })
+        .limit(1)
+        .maybeSingle(),
+    ])
+
+    if (convRes.error) {
+      console.error('[ai/autoreply GET] conversation lookup error:', convRes.error)
+      return NextResponse.json(
+        { error: 'Failed to load conversation' },
+        { status: 500 },
+      )
+    }
+    if (!convRes.data) {
+      return NextResponse.json({ error: 'Conversation not found' }, { status: 404 })
+    }
+    if (eventRes.error) {
+      // Most likely migration 040 not applied yet — degrade to "no
+      // events" rather than breaking the banner, but say so in the log.
+      console.error('[ai/autoreply GET] events lookup error:', eventRes.error)
+    }
+
+    const replyCount = convRes.data.ai_reply_count ?? 0
+    const maxReplies = configRes.data?.auto_reply_max_per_conversation ?? null
+
+    return NextResponse.json({
+      reply_count: replyCount,
+      max_replies: maxReplies,
+      cap_reached: maxReplies !== null && replyCount >= maxReplies,
+      last_event: (eventRes.data as AiReplyEventRow | null) ?? null,
+    })
+  } catch (err) {
+    return toErrorResponse(err)
+  }
+}
 
 /**
  * POST /api/ai/autoreply/[conversationId]  (agent+)

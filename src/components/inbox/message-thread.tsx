@@ -1163,6 +1163,7 @@ export function MessageThread({
         conversationId={conversation.id}
         disabled={conversation.ai_autoreply_disabled ?? false}
         handoffSummary={conversation.ai_handoff_summary}
+        replyCount={conversation.ai_reply_count}
         assignedAgentId={assignedAgentId}
         currentUserId={user?.id}
         onChange={(patch) => {

@@ -296,7 +296,12 @@
       "tookOver": "이 대화를 직접 처리하기 시작했습니다.",
       "resumed": "AI가 재개되었습니다.",
       "updateError": "AI 어시스턴트를 업데이트하지 못했습니다.",
-      "networkError": "서버에 연결할 수 없습니다."
+      "networkError": "서버에 연결할 수 없습니다.",
+      "replyCounter": "답변 {count}/{max}",
+      "capReachedTitle": "AI 어시스턴트가 이 채팅의 답변 한도에 도달했습니다 ({count}/{max})",
+      "capReachedHint": "AI를 재개하면 새 답변 횟수가 부여됩니다. 또는 에이전트 → 설정에서 한도를 높이세요.",
+      "lastAttemptFailed": "마지막 AI 답변 시도가 실패했습니다",
+      "lastAttemptSkipped": "마지막 AI 답변 시도를 건너뛰었습니다"
     }
   },
   "Contacts": {
@@ -987,7 +992,6 @@
         "no": "아니요"
       },
       "addStep": "단계 추가",
-      "delete": "삭제",
       "config": {
         "messageText": "메시지 텍스트",
         "placeholderMessageText": "안녕하세요! 문의해주셔서 감사합니다…",
@@ -1402,13 +1406,11 @@
       "deleteLocallyAria": "로컬에서 템플릿 삭제",
       "deleteMetaLocallyTitle": "Meta와 로컬에서 삭제",
       "deleteLocallyTitle": "로컬에서 삭제",
-
       "dialogEditTitle": "메시지 템플릿 수정",
       "dialogNewTitle": "새 메시지 템플릿",
       "dialogEditDesc": "변경 사항을 저장해 Meta에 재제출하세요. 검토 중에는 상태가 다시 대기 중으로 바뀝니다.",
       "dialogNewDesc": "템플릿을 만들어 Meta 승인을 요청하세요. 승인되면 브로드캐스트와 인박스에서 사용할 수 있습니다.",
       "authWarning": "AUTHENTICATION 템플릿은 본문과 OTP 버튼 형식이 고정되어 있어 별도의 빌더가 필요합니다. 지금은 Meta WhatsApp 관리자에서 만든 뒤 <bold>Meta에서 동기화</bold>로 가져오세요.",
-
       "templateName": "템플릿 이름",
       "namePlaceholder": "예: order_confirmation",
       "nameFixed": "템플릿이 Meta에 존재하면 이름이 고정됩니다 — 변경하려면 새 템플릿을 만드세요.",
@@ -1417,7 +1419,6 @@
       "language": "언어",
       "langFixed": "템플릿이 Meta에 존재하면 언어가 고정됩니다.",
       "langHint": "Meta의 정확한 코드와 일치해야 합니다 — <code>en_US</code>와 <code>en</code>은 다른 코드입니다.",
-
       "header": "헤더",
       "headerNone": "없음",
       "headerText": "텍스트",
@@ -1427,7 +1428,6 @@
       "headerTextPlaceholder": "헤더 텍스트 (최대 60자, {{1}} 선택 가능)",
       "headerSampleAria": "헤더 변수 샘플 값",
       "headerSamplePlaceholder": "{{1}}의 샘플 값 (Meta 검토에 필요)",
-
       "uploadImage": "이미지 업로드",
       "uploadHint": "JPEG 또는 PNG, 5MB 이하",
       "mediaUrlPlaceholder": "https://… (또는 공개 {format} 링크 붙여넣기)",
@@ -1435,17 +1435,14 @@
       "mediaHint": "공개적으로 접근 가능한 HTTPS 링크여야 합니다. Meta가 검토 중 한 번 가져오므로 약 24시간 동안 살아있어야 합니다.",
       "videoHint": " 권장: MP4 / 3GPP, 16MB 이하, 60초 이하.",
       "documentHint": " 권장: PDF, 100MB 이하.",
-
       "bodyText": "본문 텍스트",
       "bodyPlaceholder": "안녕하세요 {{1}}님, 주문 {{2}}이(가) 확정되었습니다.",
       "sampleValues": "샘플 값 (Meta가 템플릿 검토에 사용합니다)",
       "bodyHint": "변수에는 {{1}}, {{2}}를 사용하세요 ({{1}}부터 연속되어야 합니다).",
       "sampleAria": "본문 변수 {var}의 샘플 값",
       "samplePlaceholder": "{var}의 샘플",
-
       "footer": "푸터 (선택)",
       "footerPlaceholder": "선택적 푸터 텍스트 (최대 60자)",
-
       "buttons": "버튼 (선택)",
       "addButton": "버튼 추가",
       "buttonsLimit": "최대 {max}개 버튼. QUICK_REPLY 버튼은 URL / 전화 / 코드 복사 버튼보다 앞에 와야 합니다.",
@@ -1458,19 +1455,16 @@
       "urlSamplePlaceholder": "{{1}}의 예시 값 (URL에 변수가 있을 때 필요)",
       "phonePlaceholder": "+15551234567",
       "codePlaceholder": "예시 코드 (예: SUMMER20)",
-
       "cancel": "취소",
       "saving": "저장 중…",
       "submitting": "제출 중…",
       "saveResubmit": "저장 & 재제출",
       "submitApproval": "승인 요청",
-
       "deleteDialogTitle": "템플릿을 삭제하시겠습니까?",
       "deleteMetaDesc": "\"{name}\"이(가) Meta와 MlennyChatBot에서 삭제됩니다. 이 템플릿을 사용하는 활성 브로드캐스트는 다음 전송부터 실패하기 시작합니다. 되돌릴 수 없습니다.",
       "deleteLocalDesc": "\"{name}\"이(가) MlennyChatBot에서 삭제됩니다. Meta에 제출된 적이 없으므로 별도의 원격 정리가 필요하지 않습니다.",
       "deleting": "삭제 중…",
       "delete": "삭제",
-
       "toastLoadFailed": "템플릿을 불러오지 못했습니다",
       "toastSubmitFailed": "제출하지 못했습니다",
       "toastSubmitEditSuccess": "수정 사항이 제출되었습니다 — Meta는 보통 24시간 이내에 검토합니다.",
@@ -1617,7 +1611,6 @@
       "profileSaved": "프로필이 저장되었습니다",
       "emailChangeFailed": "이메일 변경 실패: {message}",
       "profileSavedEmailCheck": "프로필이 저장되었습니다 — 이메일 주소 변경을 확인하려면 이메일을 확인하세요",
-
       "passwordTitle": "비밀번호",
       "passwordDesc": "최소 {min}자 이상 사용하세요. 변경 후에도 이 기기에서는 로그인이 유지됩니다.",
       "currentPassword": "현재 비밀번호",
@@ -1631,7 +1624,6 @@
       "currentPasswordIncorrect": "현재 비밀번호가 올바르지 않습니다",
       "passwordUpdateFailed": "비밀번호 업데이트 실패: {message}",
       "passwordUpdated": "비밀번호가 업데이트되었습니다",
-
       "sessionsTitle": "활성 세션",
       "sessionsDesc": "이 기기를 포함해 로그인되어 있는 모든 기기에서 로그아웃합니다. 노트북을 분실했거나 비밀번호를 공유한 경우 유용합니다.",
       "signOutAll": "모든 기기에서 로그아웃",
@@ -1812,6 +1804,40 @@
       "reindex": "재색인",
       "reindexTooltip": "모든 문서를 다시 임베딩합니다 (예: 임베딩 키 추가 후)",
       "loading": "불러오는 중…"
+    }
+  },
+  "AiReplyEvents": {
+    "title": "자동 답변 활동",
+    "description": "어시스턴트가 답변해야 했던 모든 수신 메시지와 그 결과입니다. 봇이 조용해졌을 때 확인하는 곳입니다.",
+    "empty": "최근 {days}일간 자동 답변 활동이 없습니다.",
+    "emptyHint": "자동 답변이 켜진 상태에서 고객이 메시지를 보내면 여기에 행이 표시됩니다.",
+    "byReason": "결과별",
+    "recent": "최근 시도",
+    "unknownContact": "알 수 없는 연락처",
+    "loadError": "자동 답변 활동을 불러오지 못했습니다",
+    "truncated": "가장 최근 시도만 표시됩니다.",
+    "outcomes": {
+      "replied": "답변함",
+      "handoff": "사람에게 인계",
+      "skipped": "건너뜀",
+      "failed": "실패"
+    },
+    "reasons": {
+      "sent": "답변 전송됨",
+      "handoff": "팀원에게 인계됨",
+      "automation_active": "활성 자동화가 대신 메시지에 답변합니다",
+      "conversation_missing": "대화를 찾을 수 없습니다",
+      "human_assigned": "이 채팅에 팀원이 배정되어 있습니다",
+      "paused": "이 채팅에서 AI가 일시 중지되었습니다",
+      "cap_reached": "이 대화의 답변 한도에 도달했습니다",
+      "no_context": "답변할 텍스트가 없습니다",
+      "account_rate_limited": "계정 전체 버스트 한도 도달 — 1분 후 다시 시도됩니다",
+      "cap_race": "답변 한도 도달 (메시지가 동시에 도착함)",
+      "config_error": "AI 설정을 불러올 수 없습니다 (ENCRYPTION_KEY 확인)",
+      "provider_error": "AI 제공업체가 오류를 반환했습니다",
+      "claim_error": "답변 슬롯 확보 중 데이터베이스 오류 (마이그레이션 누락?)",
+      "send_error": "WhatsApp으로 답변을 보낼 수 없었습니다",
+      "unknown_error": "예기치 않은 오류"
     }
   }
 }

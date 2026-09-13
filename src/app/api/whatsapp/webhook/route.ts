@@ -927,6 +927,9 @@ async function processMessage(
       conversationId: conversation.id,
       contactId: contactRecord.id,
       configOwnerUserId,
+      // Recorded on the `ai_reply_events` row so the inbox can point at
+      // the exact customer message the bot did (or didn't) answer.
+      inboundMessageId: insertedRows[0]?.id ?? null,
     })
   }
 
