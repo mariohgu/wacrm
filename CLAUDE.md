@@ -470,10 +470,12 @@ started.
 
 The app is installable as a Progressive Web App ("Add to Home Screen"
 on iOS Safari, the install prompt on Android Chrome) and, once
-installed, opens standalone (no browser chrome). What exists today is
-the **installability + layout + mobile navigation** layer — there is
-deliberately **no service worker and no push** yet (see the phased
-plan in the 2026-09-12 change-log entry; those are later phases).
+installed, opens standalone (no browser chrome). What exists today:
+installability, standalone-safe layout, mobile navigation, and a
+minimal service worker (offline fallback + update toast). There is
+deliberately **no Web Push yet** — that is the remaining phase of the
+plan in the 2026-09-12 change-log entry, and the section below on it
+records the design decisions already taken.
 
 - [src/app/manifest.ts](src/app/manifest.ts) — Next's file convention,
   served at `/manifest.webmanifest` with the `<link rel="manifest">`
@@ -574,13 +576,62 @@ plan in the 2026-09-12 change-log entry; those are later phases).
   pull-to-refresh**, intentionally — it would reload the SPA and drop
   inbox state), `-webkit-tap-highlight-color: transparent`, and
   `touch-action: manipulation` on tappable controls.
-- [src/middleware.ts](src/middleware.ts) — matcher now excludes
-  `manifest.webmanifest` and `sw.js` (the latter pre-emptively, for the
-  service-worker phase) so the browser's PWA fetches don't pay a
-  Supabase `getUser()` round trip.
-- [next.config.ts](next.config.ts) — CSP (still report-only) gains
-  `worker-src 'self' blob:` (covers the existing opus encoder worker
-  and the future service worker).
+- [src/middleware.ts](src/middleware.ts) — matcher excludes
+  `manifest.webmanifest` and `sw.js` so the browser's PWA fetches don't
+  pay a Supabase `getUser()` round trip.
+- [next.config.ts](next.config.ts) — CSP (still report-only) has
+  `worker-src 'self' blob:` (the opus encoder worker and the service
+  worker). A dedicated `headers()` rule serves `/sw.js` with
+  `Cache-Control: no-cache, max-age=0, must-revalidate`; it sits
+  **after** the general page rule because Next merges every matching
+  rule's headers and the last one to set a key wins — without it the
+  worker would inherit `s-maxage=300` and a deploy could take five
+  minutes to be noticed at the edge, or never in a browser HTTP cache.
+- **Service worker** — [public/sw.js](public/sw.js), hand-written
+  (~150 lines, no `next-pwa`/`serwist`: they are webpack plugins and
+  Next 16 builds with Turbopack). Registered by
+  [src/components/pwa/service-worker-registration.tsx](src/components/pwa/service-worker-registration.tsx),
+  a headless client component the dashboard shell mounts once a user
+  is signed in, **production builds only** (`process.env.NODE_ENV`
+  check, inlined — in `next dev` no worker is ever registered, so HMR
+  is untouched). Its routing contract, pinned by
+  [src/components/pwa/sw.test.ts](src/components/pwa/sw.test.ts)
+  (runs the real file in a `vm` sandbox with a fake CacheStorage):
+  - **Navigations are network-first and HTML is never cached.** Every
+    page behind sign-in is personalised; the CDN rule already covers
+    short-lived caching. A 5xx is passed through as-is. Only when
+    `fetch` *throws* (network down) does it serve the precached
+    `/offline` page — [src/app/offline/page.tsx](src/app/offline/page.tsx),
+    a client component outside the `(dashboard)` group (renders
+    without the auth shell), whose only control is a plain `<a>` to
+    `DEFAULT_LANDING_PATH` (a fresh navigation = a retry, no JS
+    required). If even that was never precached, an inline 503 HTML
+    body is returned.
+  - **`/_next/static/*` is cache-first** (content-hashed, so a cached
+    copy is always correct), capped at 200 entries, oldest evicted, so
+    it can't grow across deploys.
+  - **Nothing else is intercepted** — `/api/*`, Supabase, media proxy,
+    icons, `/_next/image`, non-GET, cross-origin all go straight to the
+    network. Adding a route to the worker means adding a case to the
+    test's "leaves alone" table or its handled sections.
+  - **Update flow**: no `skipWaiting` at install. A new worker installs
+    and waits; the registration component sees it reach `installed`
+    while an old one still controls the page and shows a persistent
+    sonner toast (`Pwa.updateAvailable` / `Pwa.updateAction`); the
+    action posts `SKIP_WAITING`; on `controllerchange` the page
+    reloads once. The reload is gated on there having been a controller
+    *before* registration, because `clients.claim()` fires
+    `controllerchange` on the very first install too and reloading
+    then would be a pointless flash. **Bump `VERSION` in sw.js whenever
+    its caching logic changes** — that's what makes `activate` drop the
+    previous caches.
+  - Known verification gap: the embedded Browser pane in Claude Code
+    blocks service-worker script fetches (its request interception
+    does not cover the worker fetch context — `register()` fails with
+    "An unknown error occurred when fetching the script" while a
+    page-level `fetch('/sw.js')` returns 200). The worker's logic is
+    covered by the vm-sandbox test; the browser lifecycle needs a real
+    device or a normal Chrome window against a deployed build.
 - **The product's display name is `APP_NAME`**
   ([src/lib/brand.ts](src/lib/brand.ts), currently `"MlennyChatBot"`) —
   used by the `<title>` default and template, the manifest's `name` /
@@ -607,12 +658,60 @@ plan in the 2026-09-12 change-log entry; those are later phases).
   `src/middleware.test.ts` asserts against the constant, not a
   literal, so flipping it does not break the test.
 
-Not yet done, in intended order: a minimal hand-written
-`public/sw.js` (network-first, `Cache-Control: no-cache` header rule
-for it in `next.config.ts` — the current `s-maxage=300` rule would
-otherwise pin stale workers), then Web Push (`push_subscriptions`
-table + `web-push` + VAPID env vars). Don't reach for `next-pwa`/
-`serwist` — they're webpack plugins and Next 16 builds with Turbopack.
+**Not yet done: Web Push (phase 4).** Design agreed with the user on
+2026-09-13, to be built on the worker above:
+
+- **Platform reality.** Android Chrome/Edge/Samsung Internet: works
+  installed or in a plain tab. iPhone/iPad: **only** for the app
+  installed to the Home Screen via Safari's Share → Add to Home Screen
+  on iOS 16.4+ (Safari tab, Chrome-for-iOS tab, or a "bookmark" do not
+  qualify); the notification permission can only be requested from a
+  user gesture inside the installed app; iOS shows every push as a
+  visible notification (no silent push) and **revokes the permission
+  after three consecutive pushes the user never interacts with**, so
+  sends must be relevant and rate-limited, never chatty. Desktop
+  Chrome/Edge/Firefox and macOS Safari 16+ also work. The Badging API
+  (`navigator.setAppBadge`) works on Android and iOS-installed and is
+  the cheap complement to push for the unread count.
+- **iPhone strategy.** (1) Gate on install: detect
+  `window.matchMedia("(display-mode: standalone)").matches ||
+  navigator.standalone`; when on iOS and *not* standalone, the
+  notifications toggle renders a short install guide instead of the
+  permission button. (2) Request permission only from the Settings
+  toggle's tap (`Notification.requestPermission()` then
+  `registration.pushManager.subscribe({ userVisibleOnly: true,
+  applicationServerKey })`). (3) One subscription row per device, so a
+  user's phone and laptop both get pushed; prune on `410 Gone`/`404`
+  from the push service. (4) `notificationclick` in sw.js focuses an
+  existing app window if there is one, else opens
+  `/inbox?c=<conversationId>` — the deep link the inbox already
+  supports. (5) Update the app badge with the unread count on each
+  push and clear it when the inbox is opened.
+- **Server side.** Migration: `push_subscriptions` (account_id,
+  user_id, endpoint UNIQUE, p256dh, auth, user_agent, created_at,
+  last_seen_at; RLS: owner-only read/delete, service-role write).
+  Dependency: `web-push` (npm). Env: `NEXT_PUBLIC_VAPID_PUBLIC_KEY`,
+  `VAPID_PRIVATE_KEY`, `VAPID_SUBJECT` (a `mailto:`), generated once
+  with `npx web-push generate-vapid-keys`. Routes:
+  `POST/DELETE /api/push/subscriptions` (signed-in user, upserts /
+  removes its own row). Sender: `src/lib/push/send.ts` — takes a
+  user id list + payload, loads their subscriptions, calls
+  `webpush.sendNotification` in parallel, deletes rows on 404/410,
+  never throws (a push failure must not break the caller).
+- **Triggers.** (a) New inbound WhatsApp message — in the webhook's
+  `processMessage`, after the message upsert: notify the assigned
+  agent if any, else every account member; skip if the customer's
+  message is being handled by the AI auto-reply *and* no handoff
+  occurred (the human doesn't need to wake up for a bot-answered
+  message). (b) Conversation assigned — today a DB trigger writes the
+  `notifications` row; add a Supabase Database Webhook on
+  `notifications` INSERT → `POST /api/push/dispatch` (shared-secret
+  header) that pushes to `notifications.user_id`. That makes every
+  future in-app notification type push-capable for free.
+- **UI.** Settings → Notifications: an "Enable push on this device"
+  toggle (per-device, since subscriptions are per-device) with the iOS
+  install guide fallback above; a test-push button.
+- Not needed: any change to the AI, flows, or send paths.
 
 # Change log (Claude Code sessions)
 
@@ -1824,3 +1923,58 @@ open the installed app, confirm the five tabs and their badges, tap a
 conversation and confirm the bar disappears and the composer sits at
 the bottom, press back and confirm it returns, and tap "More" to
 confirm the drawer opens.
+
+## 2026-09-13 — PWA phase 3: service worker (offline page + update toast)
+
+Fourth step of the 2026-09-12 plan. See the new **Service worker**
+bullet in the PWA section above for the durable description; the same
+section now also records the agreed design for phase 4 (Web Push),
+including what works on Android vs iPhone and the iPhone install-gate
+strategy, so the next session can start from it.
+
+Touched:
+
+- [public/sw.js](public/sw.js) — new. Network-first navigations with
+  `/offline` fallback, cache-first `/_next/static` capped at 200,
+  everything else untouched, SKIP_WAITING message, versioned caches.
+- [src/app/offline/page.tsx](src/app/offline/page.tsx) — new. Outside
+  the dashboard group; plain-link retry.
+- [src/components/pwa/service-worker-registration.tsx](src/components/pwa/service-worker-registration.tsx)
+  — new, headless; production-only registration + update toast;
+  first-install `controllerchange` does not reload.
+- [src/components/pwa/sw.test.ts](src/components/pwa/sw.test.ts) —
+  new, 17 cases: handler set; install precaches `/offline` with
+  `cache: "reload"` and survives a failed precache; activate drops
+  only stale `mlenny-*` caches and claims clients; SKIP_WAITING;
+  six "leaves alone" cases (POST, cross-origin, `/api/*`, media proxy,
+  icons, `/_next/image`); navigation pass-through incl. 5xx with no
+  HTML cached; offline fallback from cache and the inline 503 when
+  not precached; static cache-first hit/miss, non-2xx not cached, cap
+  eviction order.
+- [src/app/(dashboard)/dashboard-shell.tsx](<src/app/(dashboard)/dashboard-shell.tsx>)
+  — mounts `<ServiceWorkerRegistration />` next to the presence
+  heartbeat.
+- [next.config.ts](next.config.ts) — `/sw.js` `Cache-Control:
+  no-cache` rule, placed after the general rule so it wins.
+- `messages/en.json`, `es.json`, `ko.json` — new top-level `Offline`
+  (title/body/retry) and `Pwa` (updateAvailable/updateAction)
+  namespaces.
+
+Verified: `npx tsc --noEmit` clean; `npx eslint` on every touched file
+(0 errors/warnings); `npx vitest run` full suite 914/916 before the
+new test file and 17/17 on it after (only the same pre-existing
+`date-utils.test.ts` timezone failures remain); `next build` lists
+`○ /offline`; `next start` + `curl`: `/sw.js` → 200,
+`application/javascript`, `Cache-Control: no-cache, max-age=0,
+must-revalidate` (versus `s-maxage=300` on `/login`, confirming the
+rule override), `/offline` → 200 with the Spanish copy and the
+`/inbox` link. **Not verified: the browser install lifecycle** — the
+embedded Browser pane refuses service-worker script fetches (see the
+"Known verification gap" note in the section above), and no real
+device was available. Manual recommended after deploy, in a normal
+Chrome window: DevTools → Application → Service Workers shows
+`sw.js` activated; toggle "Offline" and reload `/inbox` → the offline
+page appears; deploy any change → the "new version" toast appears on
+the next navigation and its button reloads onto the new build. Then
+on a phone: kill the connection, open the installed app → offline
+page instead of the browser's error screen.

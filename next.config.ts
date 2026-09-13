@@ -155,6 +155,18 @@ const nextConfig: NextConfig = {
         ],
       },
       {
+        // The service worker script. Browsers re-fetch it on every
+        // navigation (registration uses updateViaCache: "none"), and the
+        // point of that re-fetch is to notice a deploy — so it must not
+        // sit in the edge cache for 5 minutes like other pages, nor in
+        // the browser's HTTP cache at all. The general rule above also
+        // matches this path; this later rule wins for Cache-Control.
+        source: "/sw.js",
+        headers: [
+          { key: "Cache-Control", value: "no-cache, max-age=0, must-revalidate" },
+        ],
+      },
+      {
         // Security headers on every response, including /_next/static
         // assets (nosniff matters there) and /api/* (HSTS + referrer-
         // policy don't hurt).

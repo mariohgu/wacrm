@@ -1841,5 +1841,14 @@
       "send_error": "The reply could not be sent via WhatsApp",
       "unknown_error": "Unexpected error"
     }
+  },
+  "Offline": {
+    "title": "You're offline",
+    "body": "MlennyChatBot needs a connection to load your conversations. Check your network and try again.",
+    "retry": "Try again"
+  },
+  "Pwa": {
+    "updateAvailable": "A new version of MlennyChatBot is ready.",
+    "updateAction": "Update"
   }
 }

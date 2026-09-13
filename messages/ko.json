@@ -1841,5 +1841,14 @@
       "send_error": "WhatsApp으로 답변을 보낼 수 없었습니다",
       "unknown_error": "예기치 않은 오류"
     }
+  },
+  "Offline": {
+    "title": "오프라인 상태입니다",
+    "body": "MlennyChatBot이 대화를 불러오려면 인터넷 연결이 필요합니다. 네트워크를 확인한 뒤 다시 시도해 주세요.",
+    "retry": "다시 시도"
+  },
+  "Pwa": {
+    "updateAvailable": "MlennyChatBot의 새 버전이 준비되었습니다.",
+    "updateAction": "업데이트"
   }
 }

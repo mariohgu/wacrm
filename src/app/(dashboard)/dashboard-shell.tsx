@@ -10,6 +10,7 @@ import { useUnreadNotifications } from "@/hooks/use-unread-notifications";
 import { Header } from "@/components/layout/header";
 import { AccountAccessAlert } from "@/components/layout/account-access-alert";
 import { PresenceHeartbeat } from "@/components/presence/presence-heartbeat";
+import { ServiceWorkerRegistration } from "@/components/pwa/service-worker-registration";
 
 // Auth-gated dashboard shell. Extracted from the layout so the layout
 // itself can stay a server component and export metadata (noindex) —
@@ -63,6 +64,9 @@ function DashboardShellInner({ children }: { children: React.ReactNode }) {
       {/* Reports this tab's online/away presence once we know a user is
           signed in. Headless — renders nothing. */}
       <PresenceHeartbeat />
+      {/* Registers public/sw.js (production only) and shows the
+          "new version" toast. Headless. */}
+      <ServiceWorkerRegistration />
       <Sidebar
         open={sidebarOpen}
         onClose={closeSidebar}
