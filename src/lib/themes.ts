@@ -105,3 +105,16 @@ export function isThemeId(value: unknown): value is ThemeId {
     (THEME_IDS as ReadonlyArray<string>).includes(value)
   );
 }
+
+/**
+ * Browser-chrome color per mode — the Android status bar and the
+ * title bar of the installed (PWA) window. Must mirror `--background`
+ * in globals.css for the same mode; these are the sRGB hex
+ * conversions of those oklch tokens. Consumed by the manifest, the
+ * static <meta name="theme-color"> tags in layout.tsx, and the
+ * runtime sync in use-theme.tsx.
+ */
+export const THEME_COLOR_BY_MODE: Record<Mode, string> = {
+  dark: "#05070b",
+  light: "#fbfcfd",
+};

@@ -12,6 +12,7 @@ import {
   MODE_STORAGE_KEY,
   MODES,
   STORAGE_KEY,
+  THEME_COLOR_BY_MODE,
   THEME_IDS,
 } from "@/lib/themes";
 
@@ -32,6 +33,17 @@ export const metadata: Metadata = {
   },
   icons: {
     icon: [{ url: "/icon" }],
+    // iOS ignores the manifest icons and reads this tag instead. Square,
+    // opaque, 180px — iOS applies its own rounded mask.
+    apple: [{ url: "/icons/apple-touch-icon.png", sizes: "180x180" }],
+  },
+  // Installed-app behaviour on iOS: open full-screen (no Safari chrome)
+  // with the page drawn under a translucent status bar. The safe-area
+  // padding in the shell/header keeps content out from under it.
+  appleWebApp: {
+    capable: true,
+    title: "wacrm",
+    statusBarStyle: "black-translucent",
   },
   formatDetection: {
     email: false,
@@ -41,8 +53,23 @@ export const metadata: Metadata = {
 };
 
 export const viewport: Viewport = {
-  themeColor: "#020617",
+  width: "device-width",
+  initialScale: 1,
+  // Let the page extend under the notch / home indicator when installed;
+  // --safe-* in globals.css carry the insets back to the fixed chrome.
+  viewportFit: "cover",
+  // When the on-screen keyboard opens, shrink the layout viewport so a
+  // bottom-anchored composer (inbox) moves up instead of being covered.
+  interactiveWidget: "resizes-content",
   colorScheme: "dark light",
+  // Static best guess by OS preference for first paint; use-theme.tsx
+  // rewrites these to the user's actual in-app mode once React mounts,
+  // since the app's light/dark choice is its own axis (data-mode), not
+  // prefers-color-scheme.
+  themeColor: [
+    { media: "(prefers-color-scheme: dark)", color: THEME_COLOR_BY_MODE.dark },
+    { media: "(prefers-color-scheme: light)", color: THEME_COLOR_BY_MODE.light },
+  ],
 };
 
 // Inline boot script — runs before React hydrates so the user's

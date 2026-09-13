@@ -1,5 +1,6 @@
 import { createServerClient } from '@supabase/ssr'
 import { NextResponse, type NextRequest } from 'next/server'
+import { DEFAULT_LANDING_PATH } from '@/lib/navigation'
 
 export async function middleware(request: NextRequest) {
   let supabaseResponse = NextResponse.next({ request })
@@ -63,7 +64,7 @@ export async function middleware(request: NextRequest) {
       url.pathname = `/join/${encodeURIComponent(inviteToken)}`
       url.search = ''
     } else {
-      url.pathname = '/dashboard'
+      url.pathname = DEFAULT_LANDING_PATH
       url.search = ''
     }
     return withRefreshedCookies(NextResponse.redirect(url))
@@ -90,6 +91,9 @@ export async function middleware(request: NextRequest) {
 
 export const config = {
   matcher: [
-    '/((?!_next/static|_next/image|favicon.ico|.*\\.(?:svg|png|jpg|jpeg|gif|webp)$).*)',
+    // manifest.webmanifest and sw.js are fetched by the browser's PWA
+    // machinery, not by a signed-in page — no auth to check, and no
+    // reason to spend a Supabase getUser() round trip on each fetch.
+    '/((?!_next/static|_next/image|favicon.ico|manifest.webmanifest|sw.js|.*\\.(?:svg|png|jpg|jpeg|gif|webp)$).*)',
   ],
 }

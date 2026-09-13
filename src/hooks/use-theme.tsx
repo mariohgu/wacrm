@@ -14,6 +14,7 @@ import {
   DEFAULT_THEME,
   MODE_STORAGE_KEY,
   STORAGE_KEY,
+  THEME_COLOR_BY_MODE,
   isMode,
   isThemeId,
   type Mode,
@@ -108,6 +109,20 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
   const toggleMode = useCallback(() => {
     setMode(mode === "dark" ? "light" : "dark");
   }, [mode, setMode]);
+
+  // Keep the browser chrome (Android status bar, the installed-PWA
+  // window/title bar) in step with the in-app mode. layout.tsx ships
+  // static <meta name="theme-color"> tags keyed on prefers-color-scheme,
+  // which is a different axis from the user's data-mode pick — so a
+  // light-mode user on a dark-preference phone would otherwise get a
+  // dark status bar over a light app. Rewriting every tag (there is one
+  // per media query) makes them agree regardless of which one matches.
+  useEffect(() => {
+    const color = THEME_COLOR_BY_MODE[mode];
+    document
+      .querySelectorAll<HTMLMetaElement>('meta[name="theme-color"]')
+      .forEach((el) => el.setAttribute("content", color));
+  }, [mode]);
 
   // Sync from other tabs — change theme or mode in tab A, tab B
   // catches up without a refresh.

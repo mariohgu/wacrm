@@ -56,8 +56,12 @@ export function Header({ onOpenSidebar }: HeaderProps) {
     profile?.email?.charAt(0)?.toUpperCase() ??
     "U";
 
+  // Height = 3.5rem + the top safe-area inset, with the inset as
+  // padding, so the header's content sits below the status bar / notch
+  // when the app runs installed. The inbox subtracts the same terms
+  // from its own height — keep them in sync.
   return (
-    <header className="flex h-14 shrink-0 items-center justify-between gap-3 border-b border-border bg-background px-4 lg:px-6">
+    <header className="flex h-[calc(3.5rem+var(--safe-top))] shrink-0 items-center justify-between gap-3 border-b border-border bg-background px-4 pt-[var(--safe-top)] lg:px-6">
       <div className="flex min-w-0 items-center gap-2">
         {/* Hamburger — mobile only. 44×44 hit target per Apple HIG. */}
         <button

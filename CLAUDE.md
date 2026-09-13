@@ -418,6 +418,94 @@ send time (they're phone-string-driven end to end), so there's no
 `wa_user_id` to route through without new schema/UI plumbing. Not yet
 started.
 
+
+## PWA / installed-app baseline (`src/app/manifest.ts`, safe areas)
+
+The app is installable as a Progressive Web App ("Add to Home Screen"
+on iOS Safari, the install prompt on Android Chrome) and, once
+installed, opens standalone (no browser chrome). What exists today is
+the **installability + layout** layer only — there is deliberately
+**no service worker and no push** yet (see the phased plan in the
+2026-09-12 change-log entry; those are later phases).
+
+- [src/app/manifest.ts](src/app/manifest.ts) — Next's file convention,
+  served at `/manifest.webmanifest` with the `<link rel="manifest">`
+  auto-injected. `start_url: "/inbox"`, `display: "standalone"`.
+  Colors come from `THEME_COLOR_BY_MODE` (below), not literals.
+- `public/icons/` — `icon-192.png`, `icon-512.png`,
+  `icon-maskable-512.png` (full-bleed, glyph in the 80% safe zone for
+  Android adaptive masks), `apple-touch-icon.png` (180px, square,
+  opaque — iOS applies its own mask). All rendered from the same brand
+  mark as `src/app/icon.tsx` via a one-off `sharp` script (not
+  checked in); regenerate the same way if the mark changes.
+- [src/lib/themes.ts](src/lib/themes.ts) — `THEME_COLOR_BY_MODE`
+  (`dark: "#05070b"`, `light: "#fbfcfd"`): sRGB hex of the two
+  `--background` oklch tokens in `globals.css`. **Must be kept in sync
+  by hand** if those tokens change — used by the manifest, the static
+  `<meta name="theme-color">` tags, and the runtime sync in
+  `use-theme.tsx`.
+- [src/app/layout.tsx](src/app/layout.tsx) — `viewport` now declares
+  `viewportFit: "cover"` (page extends under notch/home indicator when
+  installed), `interactiveWidget: "resizes-content"` (on-screen
+  keyboard shrinks the layout viewport so the inbox composer moves up
+  instead of being covered), and per-`prefers-color-scheme`
+  `themeColor` entries. `metadata.appleWebApp` (`capable`,
+  `statusBarStyle: "black-translucent"`) and `icons.apple` cover iOS,
+  which ignores the manifest icons.
+- [src/hooks/use-theme.tsx](src/hooks/use-theme.tsx) — an effect
+  rewrites every `meta[name="theme-color"]` to `THEME_COLOR_BY_MODE[mode]`
+  whenever the in-app mode changes. Needed because the app's
+  light/dark choice is its own axis (`data-mode`), not
+  `prefers-color-scheme`, so the static tags alone would give a
+  light-mode user on a dark-preference phone a dark status bar.
+- **Safe areas**: `globals.css` exposes `--safe-top/bottom/left/right`
+  (`env(safe-area-inset-*, 0px)`). The header and the sidebar's logo
+  row are `h-[calc(3.5rem+var(--safe-top))]` + `pt-[var(--safe-top)]`;
+  the dashboard shell's content column and the sidebar footer pad by
+  `--safe-bottom`. The inbox's fixed height is
+  `calc(100dvh - 3.5rem - var(--safe-top) - var(--safe-bottom))` —
+  **these three places encode the same header height and must change
+  together.** All resolve to 0px in a normal browser tab, so desktop is
+  visually unchanged.
+- `h-screen`/`min-h-screen`/`100vh` → `h-dvh`/`min-h-dvh`/`100dvh`
+  across the shell, inbox, auth pages, join layout and the automation
+  editor's loading states. On mobile Safari `100vh` is the
+  toolbars-hidden height, which pushed the composer off-screen; `dvh`
+  tracks the visible viewport. Don't reintroduce `vh` for full-height
+  layouts.
+- `globals.css` also sets `overscroll-behavior-y: none` on `body`
+  (kills rubber-banding; **also disables Chrome-Android
+  pull-to-refresh**, intentionally — it would reload the SPA and drop
+  inbox state), `-webkit-tap-highlight-color: transparent`, and
+  `touch-action: manipulation` on tappable controls.
+- [src/middleware.ts](src/middleware.ts) — matcher now excludes
+  `manifest.webmanifest` and `sw.js` (the latter pre-emptively, for the
+  service-worker phase) so the browser's PWA fetches don't pay a
+  Supabase `getUser()` round trip.
+- [next.config.ts](next.config.ts) — CSP (still report-only) gains
+  `worker-src 'self' blob:` (covers the existing opus encoder worker
+  and the future service worker).
+- **The app's landing route is the Inbox, not the Dashboard.**
+  [src/lib/navigation.ts](src/lib/navigation.ts)'s `DEFAULT_LANDING_PATH`
+  is the single source of truth, consumed by the root route
+  ([src/app/page.tsx](src/app/page.tsx)), the middleware's
+  already-signed-in bounce off `/login`, the post-sign-in redirect, the
+  post-invite-accept redirect, the sidebar logo link, and the
+  manifest's `start_url`. Kept import-free so `src/middleware.ts` can
+  use it in the Edge runtime. Every role (owner → viewer) can open the
+  Inbox, so it is a safe destination for any signed-in user — if that
+  changes, this constant becomes a function of the role.
+  `src/middleware.test.ts` asserts against the constant, not a
+  literal, so flipping it does not break the test.
+
+Not yet done, in intended order: bottom tab bar for `<lg` (replacing
+the hamburger-drawer as primary mobile nav), a minimal hand-written
+`public/sw.js` (network-first, `Cache-Control: no-cache` header rule
+for it in `next.config.ts` — the current `s-maxage=300` rule would
+otherwise pin stale workers), then Web Push (`push_subscriptions`
+table + `web-push` + VAPID env vars). Don't reach for `next-pwa`/
+`serwist` — they're webpack plugins and Next 16 builds with Turbopack.
+
 # Change log (Claude Code sessions)
 
 ## 2026-08-02 — Add OpenRouter as a third AI provider
@@ -1334,3 +1422,72 @@ Deferred at the user's own request — unclear whether it's new
 (possibly related to transcription's extra `getMediaUrl` call per
 voice note) or a pre-existing occasional failure; needs its own
 investigation.
+
+## 2026-09-12 — PWA phases 0+1: installable, standalone-safe layout
+
+User asked how to make the app feel like an installable mobile app
+instead of "a website on a phone", without breaking anything. Audit
+found no PWA foundation at all (no manifest, no service worker, no
+install icons, `themeColor` hardcoded dark, no safe-area handling,
+`100vh`-based full-height layouts) plus hamburger-drawer navigation
+as the only mobile nav. Agreed on a five-phase plan (0: installable;
+1: standalone-safe layout; 2: bottom tab bar; 3: minimal service
+worker + update toast; 4: Web Push) and shipped phases 0 and 1 in
+this session — see the new **PWA / installed-app baseline** section
+above for the durable description of what exists now.
+
+Touched:
+
+- [src/app/manifest.ts](src/app/manifest.ts) — new.
+- `public/icons/` — 4 new PNGs generated with `sharp` from the
+  `icon.tsx` brand mark (script was run once from the repo root and
+  not committed; CRLF/`NODE_PATH` gotcha: scripts in the scratchpad
+  can't resolve `node_modules`, run them from the repo).
+- [src/lib/themes.ts](src/lib/themes.ts) — `THEME_COLOR_BY_MODE`.
+- [src/app/layout.tsx](src/app/layout.tsx) — `viewport` (`width`,
+  `initialScale`, `viewportFit`, `interactiveWidget`, media-keyed
+  `themeColor`), `metadata.appleWebApp`, `metadata.icons.apple`.
+- [src/hooks/use-theme.tsx](src/hooks/use-theme.tsx) — theme-color
+  meta sync effect.
+- [src/app/globals.css](src/app/globals.css) — safe-area variables,
+  tap-highlight, overscroll, touch-action block appended at the end.
+- [src/app/(dashboard)/dashboard-shell.tsx](<src/app/(dashboard)/dashboard-shell.tsx>),
+  [src/components/layout/header.tsx](src/components/layout/header.tsx),
+  [src/components/layout/sidebar.tsx](src/components/layout/sidebar.tsx),
+  [src/app/(dashboard)/inbox/page.tsx](<src/app/(dashboard)/inbox/page.tsx>)
+  — `dvh` + safe-area padding (see the section above for the
+  three-places-in-sync rule on the header height).
+- [src/app/(dashboard)/automations/[id]/edit/page.tsx](<src/app/(dashboard)/automations/[id]/edit/page.tsx>),
+  the three `(auth)` pages, [src/app/join/layout.tsx](src/app/join/layout.tsx)
+  — mechanical `h-screen`/`min-h-screen` → `dvh`.
+- [src/middleware.ts](src/middleware.ts) — matcher exclusions;
+  [next.config.ts](next.config.ts) — `worker-src`.
+
+Same session, follow-up: the app now opens on the **Inbox** instead of
+the Dashboard. The user asked for this right after phases 0+1 — on a
+phone the app is opened to answer a customer, not to read charts, and
+the manifest's `start_url` already pointed at `/inbox`, so the four
+redirect points disagreed with it. Introduced
+[src/lib/navigation.ts](src/lib/navigation.ts) (`DEFAULT_LANDING_PATH`)
+rather than editing five literals, and pointed the sidebar logo at it
+too so "home" means one thing everywhere. `/dashboard` is unchanged
+and still reachable from the nav.
+
+No DB migration, no i18n keys, no dependency added. Verified:
+`npx tsc --noEmit` clean; `npx eslint` on every touched file (0
+errors, 3 pre-existing warnings on untouched lines); full `npx vitest
+run` (898/900 — only the same pre-existing `date-utils.test.ts`
+timezone failures); `next build` succeeds and lists
+`○ /manifest.webmanifest`; `next start` + `curl` confirmed the
+manifest JSON (`application/manifest+json`), the `viewport` meta with
+`viewport-fit=cover, interactive-widget=resizes-content`, both
+`theme-color` tags, the `apple-touch-icon`/`apple-mobile-web-app-*`
+tags, and `200 image/png` for the icons. Not verified on a real
+device — manual recommended before considering this closed: open the
+deployed URL on Android Chrome (expect the install prompt / "Install
+app" menu entry) and on iPhone Safari (Share → Add to Home Screen),
+launch from the home screen, and confirm (a) no browser bar, (b) the
+header sits below the status bar / notch, (c) the inbox composer sits
+above the home indicator and rises with the keyboard, (d) switching
+light/dark in-app recolors the Android status bar. Tailwind's
+`h-dvh` needs iOS 15.4+ / Chrome 108+, which every current phone has.

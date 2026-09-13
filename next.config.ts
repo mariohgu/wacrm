@@ -53,6 +53,10 @@ const SECURITY_HEADERS = [
       // and Supabase public-bucket audio/video the inbox renders.
       "media-src 'self' blob: https://*.supabase.co",
       "font-src 'self' data:",
+      // Web workers: the opus voice-note encoder (public/opus/) today,
+      // the PWA service worker (sw.js) once it ships. blob: covers
+      // libraries that spawn workers from an inline blob URL.
+      "worker-src 'self' blob:",
       // Supabase REST + realtime (WSS). All Meta API calls happen
       // server-side, so graph.facebook.com does not belong here.
       "connect-src 'self' https://*.supabase.co wss://*.supabase.co",

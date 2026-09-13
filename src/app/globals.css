@@ -228,3 +228,47 @@ html[data-theme="rose"] {
     @apply font-sans;
   }
 }
+/* ============================================================
+ * INSTALLED-APP (PWA) BASELINE
+ *
+ * The viewport is declared with `viewport-fit: cover` (layout.tsx),
+ * so when the app runs installed on a phone the page extends under
+ * the status bar / notch and the home indicator. These variables
+ * expose the OS insets so the fixed chrome (header, sidebar footer,
+ * inbox composer) can pad itself out of them. They resolve to 0px in
+ * a normal browser tab, so desktop and non-installed mobile are
+ * unaffected.
+ * ============================================================ */
+:root {
+  --safe-top: env(safe-area-inset-top, 0px);
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
+  --safe-left: env(safe-area-inset-left, 0px);
+  --safe-right: env(safe-area-inset-right, 0px);
+}
+
+/* No grey flash on tap (mobile WebKit / Blink) — controls already have
+ * their own hover/active styles. */
+html {
+  -webkit-tap-highlight-color: transparent;
+}
+
+/* Kill the rubber-band overscroll on the document. The dashboard shell
+ * is a fixed-height flex layout with its own scroll containers, so the
+ * document itself never has anything to scroll — bouncing it just
+ * reveals the body background behind the app. This also disables
+ * Chrome-Android's pull-to-refresh, which would reload the whole SPA
+ * and drop the inbox state (the thread header has its own refresh). */
+body {
+  overscroll-behavior-y: none;
+}
+
+/* Removes the legacy 300ms double-tap-to-zoom delay on tappable
+ * controls without disabling pinch-zoom for the page. */
+a,
+button,
+input,
+select,
+textarea,
+[role="button"] {
+  touch-action: manipulation;
+}

@@ -52,6 +52,7 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog';
 import { createClient } from '@/lib/supabase/client';
+import { DEFAULT_LANDING_PATH } from '@/lib/navigation';
 
 interface PeekOk {
   ok: true;
@@ -194,7 +195,7 @@ export default function JoinPage() {
       toast.success('Welcome to the team');
       // Full reload (not router.push) so AuthProvider re-fetches
       // the profile with the new account_id and account_role.
-      window.location.href = '/dashboard';
+      window.location.href = DEFAULT_LANDING_PATH;
     } catch (err) {
       console.error('[join] redeem error:', err);
       toast.error('Could not reach the server');

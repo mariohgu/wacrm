@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { NextRequest } from "next/server";
+import { DEFAULT_LANDING_PATH } from "@/lib/navigation";
 
 // --- Scenario knobs the mock reads -----------------------------------------
 // `mockUser`         — what getUser() resolves to (a refreshed session ⇒ user,
@@ -62,9 +63,9 @@ describe("middleware — refreshed auth cookies survive redirects", () => {
       new NextRequest("https://app.test/login"),
     );
 
-    // Redirect to /dashboard…
+    // Redirect to the default landing route…
     expect(res.status).toBe(307);
-    expect(res.headers.get("location")).toContain("/dashboard");
+    expect(res.headers.get("location")).toContain(DEFAULT_LANDING_PATH);
     // …and the rotated cookie MUST ride along, otherwise the browser keeps
     // replaying the now-consumed refresh token and the session wedges until
     // the user manually clears cookies.
