@@ -1567,6 +1567,43 @@
       "step4_5": "Suscríbete al campo del webhook \"messages\"",
       "metaDocs": "Documentación de la API de Meta WhatsApp"
     },
+    "push": {
+      "title": "Notificaciones push",
+      "description": "Recibe avisos en este dispositivo cuando un cliente escribe, incluso con la app cerrada. Se activa por dispositivo.",
+      "checking": "Comprobando este dispositivo…",
+      "iosTitle": "Primero instala la app",
+      "iosStep1": "Abre esta página en Safari.",
+      "iosStep2": "Toca Compartir y luego \"Añadir a pantalla de inicio\".",
+      "iosStep3": "Abre MlennyChatBot desde la pantalla de inicio y vuelve aquí para activar las notificaciones.",
+      "unsupportedTitle": "No compatible con este navegador",
+      "unsupportedBody": "Este navegador no puede recibir notificaciones push. Prueba con Chrome o Edge, o instala la app en tu teléfono.",
+      "notConfiguredTitle": "No configurado en el servidor",
+      "notConfiguredBody": "El servidor aún no tiene claves VAPID. Define NEXT_PUBLIC_VAPID_PUBLIC_KEY, VAPID_PRIVATE_KEY y VAPID_SUBJECT y vuelve a desplegar.",
+      "noWorkerTitle": "Todavía no disponible",
+      "noWorkerBody": "El proceso en segundo plano de la app no está activo en este navegador (solo corre en builds de producción). Recarga la página e inténtalo de nuevo.",
+      "deniedTitle": "Bloqueadas por el navegador",
+      "deniedBody": "Las notificaciones están bloqueadas para este sitio. Permítelas en los ajustes del navegador o del sistema y recarga.",
+      "disabledTitle": "Desactivadas en este dispositivo",
+      "disabledBody": "Activa las notificaciones para enterarte de los mensajes nuevos con la app cerrada.",
+      "enableButton": "Activar en este dispositivo",
+      "enabledTitle": "Activadas en este dispositivo",
+      "enabledBody": "Este dispositivo recibirá avisos. Actívalas en cada teléfono o computadora que uses.",
+      "testButton": "Enviar prueba",
+      "disableButton": "Desactivar",
+      "enabledToast": "Notificaciones activadas en este dispositivo",
+      "disabledToast": "Notificaciones desactivadas en este dispositivo",
+      "deniedToast": "No se concedió el permiso",
+      "enableFailed": "No se pudieron activar las notificaciones",
+      "testFailed": "No se pudo enviar la prueba",
+      "testSent": "Prueba enviada a {count, plural, =1 {1 dispositivo} other {# dispositivos}}",
+      "testNoDevice": "No se encontró ningún dispositivo suscrito para tu cuenta",
+      "whatTitle": "Qué vas a recibir",
+      "whatBadge": "Un contador en el ícono de la app con las conversaciones que esperan respuesta, incluidas las que está atendiendo el asistente.",
+      "whatQuiet": "Una notificación silenciosa cuando un cliente escribe y el asistente o un flujo ya respondió.",
+      "whatLoud": "Una notificación normal cuando un cliente escribe y nadie ha respondido.",
+      "whatAttention": "Una notificación cuando el asistente deriva una conversación, alcanza su límite de respuestas o falla.",
+      "iosNote": "En iPhone las notificaciones solo funcionan con la app instalada en la pantalla de inicio, y iOS las desactiva tras tres ignoradas seguidas."
+    },
     "sections": {
       "overview": "Resumen",
       "profile": "Tu perfil",
@@ -1579,7 +1616,8 @@
       "deals": "Tratos y moneda",
       "members": "Miembros del equipo",
       "api": "Claves de API",
-      "salon-booking": "Reservas del salón"
+      "salon-booking": "Reservas del salón",
+      "push": "Notificaciones push"
     },
     "groups": {
       "account": "Cuenta",
@@ -1850,5 +1888,19 @@
   "Pwa": {
     "updateAvailable": "Hay una nueva versión de MlennyChatBot lista.",
     "updateAction": "Actualizar"
+  },
+  "Push": {
+    "newMessageTitle": "{name}",
+    "botRepliedTitle": "{name} · respondió el asistente",
+    "needsAttentionTitle": "{name} necesita a una persona",
+    "reasonHandoff": "El asistente derivó esta conversación.",
+    "reasonCapReached": "El asistente alcanzó su límite de respuestas en esta conversación.",
+    "reasonRateLimited": "El asistente está limitado por frecuencia en este momento.",
+    "reasonFailed": "El asistente no pudo responder.",
+    "hiddenNumber": "Número oculto",
+    "mediaPreview": "Envió un adjunto",
+    "assignedTitle": "Conversación asignada a ti",
+    "testTitle": "MlennyChatBot",
+    "testBody": "Las notificaciones push funcionan en este dispositivo."
   }
 }

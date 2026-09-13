@@ -24,11 +24,13 @@
  * page sees `controllerchange` and reloads. Bump VERSION whenever the
  * caching logic here changes so old caches get dropped on activate.
  *
- * Web Push (`push` / `notificationclick` handlers) is the next phase
- * and belongs in this file when it lands.
+ * Web Push: `push` updates the app-icon badge and shows (or quietly
+ * replaces) a notification — payload shape: PushPayload in
+ * src/lib/push/send.ts; `notificationclick` focuses the app on the
+ * conversation; `pushsubscriptionchange` re-subscribes silently.
  */
 
-const VERSION = "v1";
+const VERSION = "v2";
 const STATIC_CACHE = `mlenny-static-${VERSION}`;
 const OFFLINE_CACHE = `mlenny-offline-${VERSION}`;
 const OFFLINE_URL = "/offline";
@@ -81,6 +83,110 @@ self.addEventListener("message", (event) => {
   if (event.data && event.data.type === "SKIP_WAITING") {
     self.skipWaiting();
   }
+});
+
+// ---- Web Push --------------------------------------------------------
+
+self.addEventListener("push", (event) => {
+  let data = {};
+  try {
+    data = event.data ? event.data.json() : {};
+  } catch {
+    // Not JSON (a bare-text test push from a dashboard, say) — still
+    // surface it rather than swallow it.
+    data = { title: "MlennyChatBot", body: event.data ? event.data.text() : "" };
+  }
+  event.waitUntil(handlePush(data));
+});
+
+async function handlePush(data) {
+  // The app-icon badge is refreshed on EVERY push, quiet or not: it is
+  // the "a customer wrote" signal the team wants even while the
+  // assistant is the one answering.
+  await setBadge(data.badge);
+
+  const windows = await self.clients.matchAll({ type: "window", includeUncontrolled: true });
+  const visible = windows.find((client) => client.visibilityState === "visible");
+  if (visible) {
+    // The open app already shows the message through realtime. Tell it
+    // anyway (anything listening can react), and for a quiet push stop
+    // here — no banner over a screen that already shows the thread.
+    // Loud pushes (a human must act) are still shown so they make a
+    // sound even with the app in front.
+    visible.postMessage({ type: "PUSH_RECEIVED", payload: data });
+    if (data.quiet) return;
+  }
+
+  await self.registration.showNotification(data.title || "MlennyChatBot", {
+    body: data.body || "",
+    // Same conversation → the new notification replaces the previous
+    // one instead of stacking; renotify only when it is worth a sound.
+    tag: data.tag || undefined,
+    renotify: !!data.tag && !data.quiet,
+    silent: !!data.quiet,
+    icon: "/icons/icon-192.png",
+    badge: "/icons/badge-96.png",
+    data: { url: data.url || "/inbox" },
+  });
+}
+
+async function setBadge(count) {
+  if (typeof count !== "number") return;
+  const nav = self.navigator;
+  if (!nav || typeof nav.setAppBadge !== "function") return;
+  try {
+    if (count > 0) await nav.setAppBadge(count);
+    else if (typeof nav.clearAppBadge === "function") await nav.clearAppBadge();
+    else await nav.setAppBadge(0);
+  } catch {
+    // Badging refused in this context — nothing to do.
+  }
+}
+
+self.addEventListener("notificationclick", (event) => {
+  event.notification.close();
+  const url = (event.notification.data && event.notification.data.url) || "/inbox";
+  event.waitUntil(openOrFocus(url));
+});
+
+async function openOrFocus(url) {
+  const target = new URL(url, self.location.origin).href;
+  const windows = await self.clients.matchAll({ type: "window", includeUncontrolled: true });
+  for (const client of windows) {
+    if ("focus" in client) {
+      try {
+        await client.focus();
+        if ("navigate" in client) await client.navigate(target);
+        return;
+      } catch {
+        // Fall through to opening a fresh window.
+      }
+    }
+  }
+  await self.clients.openWindow(target);
+}
+
+// The push service rotated this browser's subscription (rare, but it
+// happens). Re-subscribe with the same key and tell the server, so the
+// device keeps receiving without the user touching Settings again.
+self.addEventListener("pushsubscriptionchange", (event) => {
+  const oldKey =
+    event.oldSubscription &&
+    event.oldSubscription.options &&
+    event.oldSubscription.options.applicationServerKey;
+  if (!oldKey) return;
+  event.waitUntil(
+    self.registration.pushManager
+      .subscribe({ userVisibleOnly: true, applicationServerKey: oldKey })
+      .then((subscription) =>
+        fetch("/api/push/subscriptions", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(subscription.toJSON()),
+        }),
+      )
+      .catch(() => {}),
+  );
 });
 
 self.addEventListener("fetch", (event) => {

@@ -470,12 +470,11 @@ started.
 
 The app is installable as a Progressive Web App ("Add to Home Screen"
 on iOS Safari, the install prompt on Android Chrome) and, once
-installed, opens standalone (no browser chrome). What exists today:
-installability, standalone-safe layout, mobile navigation, and a
-minimal service worker (offline fallback + update toast). There is
-deliberately **no Web Push yet** — that is the remaining phase of the
-plan in the 2026-09-12 change-log entry, and the section below on it
-records the design decisions already taken.
+installed, opens standalone (no browser chrome). All five phases of
+the 2026-09-12 plan are in: installability, standalone-safe layout,
+mobile navigation, a minimal service worker (offline fallback + update
+toast), and Web Push with an app-icon badge. The **Web Push** bullet
+below is the durable description of the last one.
 
 - [src/app/manifest.ts](src/app/manifest.ts) — Next's file convention,
   served at `/manifest.webmanifest` with the `<link rel="manifest">`
@@ -658,60 +657,102 @@ records the design decisions already taken.
   `src/middleware.test.ts` asserts against the constant, not a
   literal, so flipping it does not break the test.
 
-**Not yet done: Web Push (phase 4).** Design agreed with the user on
-2026-09-13, to be built on the worker above:
+**Web Push + app-icon badge** (phase 4, shipped 2026-09-13). What
+the user asked for, verbatim in intent: the icon badge must show that
+someone wrote *even while the assistant is answering*, and a
+notification must arrive *exactly when a person has to step in*.
 
-- **Platform reality.** Android Chrome/Edge/Samsung Internet: works
-  installed or in a plain tab. iPhone/iPad: **only** for the app
-  installed to the Home Screen via Safari's Share → Add to Home Screen
-  on iOS 16.4+ (Safari tab, Chrome-for-iOS tab, or a "bookmark" do not
-  qualify); the notification permission can only be requested from a
-  user gesture inside the installed app; iOS shows every push as a
-  visible notification (no silent push) and **revokes the permission
-  after three consecutive pushes the user never interacts with**, so
-  sends must be relevant and rate-limited, never chatty. Desktop
-  Chrome/Edge/Firefox and macOS Safari 16+ also work. The Badging API
-  (`navigator.setAppBadge`) works on Android and iOS-installed and is
-  the cheap complement to push for the unread count.
-- **iPhone strategy.** (1) Gate on install: detect
-  `window.matchMedia("(display-mode: standalone)").matches ||
-  navigator.standalone`; when on iOS and *not* standalone, the
-  notifications toggle renders a short install guide instead of the
-  permission button. (2) Request permission only from the Settings
-  toggle's tap (`Notification.requestPermission()` then
-  `registration.pushManager.subscribe({ userVisibleOnly: true,
-  applicationServerKey })`). (3) One subscription row per device, so a
-  user's phone and laptop both get pushed; prune on `410 Gone`/`404`
-  from the push service. (4) `notificationclick` in sw.js focuses an
-  existing app window if there is one, else opens
-  `/inbox?c=<conversationId>` — the deep link the inbox already
-  supports. (5) Update the app badge with the unread count on each
-  push and clear it when the inbox is opened.
-- **Server side.** Migration: `push_subscriptions` (account_id,
-  user_id, endpoint UNIQUE, p256dh, auth, user_agent, created_at,
-  last_seen_at; RLS: owner-only read/delete, service-role write).
-  Dependency: `web-push` (npm). Env: `NEXT_PUBLIC_VAPID_PUBLIC_KEY`,
-  `VAPID_PRIVATE_KEY`, `VAPID_SUBJECT` (a `mailto:`), generated once
-  with `npx web-push generate-vapid-keys`. Routes:
-  `POST/DELETE /api/push/subscriptions` (signed-in user, upserts /
-  removes its own row). Sender: `src/lib/push/send.ts` — takes a
-  user id list + payload, loads their subscriptions, calls
-  `webpush.sendNotification` in parallel, deletes rows on 404/410,
-  never throws (a push failure must not break the caller).
-- **Triggers.** (a) New inbound WhatsApp message — in the webhook's
-  `processMessage`, after the message upsert: notify the assigned
-  agent if any, else every account member; skip if the customer's
-  message is being handled by the AI auto-reply *and* no handoff
-  occurred (the human doesn't need to wake up for a bot-answered
-  message). (b) Conversation assigned — today a DB trigger writes the
-  `notifications` row; add a Supabase Database Webhook on
-  `notifications` INSERT → `POST /api/push/dispatch` (shared-secret
-  header) that pushes to `notifications.user_id`. That makes every
-  future in-app notification type push-capable for free.
-- **UI.** Settings → Notifications: an "Enable push on this device"
-  toggle (per-device, since subscriptions are per-device) with the iOS
-  install guide fallback above; a test-push button.
-- Not needed: any change to the AI, flows, or send paths.
+- **Platform reality.** Android Chrome/Edge/Samsung: installed or in a
+  tab. iPhone/iPad: **only** the app installed to the Home Screen via
+  Safari's Share → Add to Home Screen (iOS 16.4+); a Safari/Chrome tab
+  has no `PushManager`. The permission can only be requested from a
+  user gesture; iOS shows every push visibly (no silent push) and
+  **revokes the permission after three consecutive pushes the user
+  never taps** — the reason quiet pushes collapse per conversation
+  (`tag`) instead of stacking. Desktop Chrome/Edge/Firefox and macOS
+  Safari 16+ also work. The Badging API (`navigator.setAppBadge`) is
+  available on Android and iOS-installed.
+- **Three kinds of push**, decided in
+  [src/lib/push/inbound.ts](src/lib/push/inbound.ts)'s `classifyInbound`
+  from what the responders did (pinned by `inbound.test.ts`):
+  - `bot_replied` (**quiet**): a Flow consumed the message, an
+    interactive menu handled the tap, the assistant replied, or an
+    automation owns auto-responses (`skipped/automation_active`).
+    Delivered with `silent: true`, `renotify: false`, and **dropped
+    entirely when an app window is visible** — but the badge is still
+    set. This is the "someone wrote while the bot talks" signal.
+  - `new_message` (normal): no auto-reply configured, media-only, or
+    the assistant stood aside on purpose (`human_assigned`, `paused`,
+    `no_context`, `conversation_missing`, any unknown reason). A human
+    is expected to reply.
+  - `needs_attention` (normal, shown even when the app is visible):
+    `handoff` (body = reason + the assistant's `ai_handoff_summary`),
+    `failed/*`, `skipped/cap_reached`, `skipped/cap_race`,
+    `skipped/account_rate_limited`. The exact moment a person must
+    step in.
+  Recipients: the assigned agent if any (re-read from the row *after*
+  the AI ran, because a handoff may have just assigned one), else every
+  `profiles` row of the account. Title is the contact's name, else the
+  real phone, else `@username`, else "Hidden number" — never the BSUID
+  placeholder. Every payload carries `badge` = count of the account's
+  conversations with `unread_count > 0` (`countUnreadConversations`),
+  which includes bot-answered threads because "unread" means unread by
+  a human.
+- **Where it hooks in.** The webhook's `processMessage` calls
+  `notifyInboundMessage` **after** the Flow runner and
+  `dispatchInboundToAiReply`, which now **returns its
+  `AutoReplyAttempt`** (was `void`) precisely so the push can be
+  classified — the `ai_reply_events` row is still written as before.
+  A conversation-assigned notification (DB trigger, migration 027)
+  becomes a push through `POST /api/push/dispatch`
+  ([route.ts](src/app/api/push/dispatch/route.ts)), the target of a
+  **Supabase Database Webhook** on `notifications` INSERT — one-time
+  dashboard setup (URL + `x-push-secret` header =
+  `PUSH_DISPATCH_SECRET`, constant-time compared; 503 when the env var
+  is unset, so it's never open by accident). Any notification type
+  added later is push-capable for free.
+- **Sender**: [src/lib/push/send.ts](src/lib/push/send.ts) —
+  `sendPushToUsers` (web-push, VAPID from env, `TTL` 1h, `urgency`
+  high/normal by `quiet`; never throws; deletes rows on 404/410 →
+  `pruned`), `isPushConfigured`, `countUnreadConversations`.
+  Copy comes from the `Push` namespace in `messages/*.json` via
+  [copy.ts](src/lib/push/copy.ts) (same locale/fallback rule as the UI,
+  loaded directly because senders run inside `after()` / route
+  handlers, not a request-scoped next-intl context).
+- **Worker side** (sw.js, VERSION v2): `push` → `setAppBadge(badge)`
+  always; `clients.matchAll` — visible window → `postMessage`
+  `PUSH_RECEIVED` and return if quiet; else `showNotification` with
+  `tag`, `icon-192`, `badge-96` (alpha-only Android status-bar icon,
+  generated by scripts/generate-icons.mjs), `data.url`.
+  `notificationclick` → focus + `navigate()` an existing window to
+  `/inbox?c=<id>` (deep link the inbox already honours), else
+  `openWindow`. `pushsubscriptionchange` → re-subscribe with the old
+  key and POST it to the server. Covered by `sw.test.ts`.
+- **Client**: [src/lib/push/client.ts](src/lib/push/client.ts)
+  (feature detection, iOS/standalone detection, subscribe/unsubscribe
+  + server registration, base64url → `Uint8Array<ArrayBuffer>`),
+  [src/hooks/use-app-badge.ts](src/hooks/use-app-badge.ts) (the shell
+  mirrors `totalUnread` onto the icon while the app is open; the
+  worker does it while closed), and Settings → **Push notifications**
+  ([push-notifications.tsx](src/components/settings/push-notifications.tsx),
+  section `push`, Account group — per *device*). Status ladder:
+  `ios_not_installed` (install steps instead of a dead button) →
+  `unsupported` → `not_configured` (no VAPID) → `no_worker` (dev
+  builds never register the worker) → `denied` → `enabled`/`disabled`;
+  "Send a test" hits `POST /api/push/test`.
+- **DB/API**: migration
+  [040_push_subscriptions.sql](supabase/migrations/040_push_subscriptions.sql)
+  — `push_subscriptions` (account_id, user_id, endpoint UNIQUE,
+  p256dh, auth, user_agent, timestamps), RLS: own rows only, insert
+  pinned to `is_account_member(account_id)`; service role writes
+  bypass it for pruning. `POST/DELETE /api/push/subscriptions` (any
+  member, RLS client, upsert on endpoint).
+- **Env** (see .env.local.example): `NEXT_PUBLIC_VAPID_PUBLIC_KEY`,
+  `VAPID_PRIVATE_KEY` (generate ONCE with `npx web-push
+  generate-vapid-keys`; **rotating silently invalidates every device**),
+  `VAPID_SUBJECT` (`mailto:`, Apple checks it), `PUSH_DISPATCH_SECRET`.
+  Without the VAPID pair the feature is inert end to end.
+- Dependency added: `web-push` (+ `@types/web-push`).
 
 # Change log (Claude Code sessions)
 
@@ -1978,3 +2019,67 @@ page appears; deploy any change → the "new version" toast appears on
 the next navigation and its button reloads onto the new build. Then
 on a phone: kill the connection, open the installed app → offline
 page instead of the browser's error screen.
+
+## 2026-09-13 — PWA phase 4: Web Push + app-icon badge
+
+Last step of the 2026-09-12 plan. User's two hard requirements: the
+app-icon badge must say "a customer wrote" **even while the assistant
+is answering**, and a notification must arrive **exactly when a person
+has to intervene**. See the **Web Push + app-icon badge** bullet in the
+PWA section above for the as-built design (three push kinds, recipient
+rule, platform reality incl. the iPhone install gate).
+
+Touched:
+
+- [supabase/migrations/040_push_subscriptions.sql](supabase/migrations/040_push_subscriptions.sql)
+  — **new migration, must be applied**.
+- `src/lib/push/` — new: `send.ts` (web-push sender, prune on 404/410,
+  badge count), `copy.ts` (locale copy for server senders),
+  `inbound.ts` (`classifyInbound` + `notifyInboundMessage`),
+  `client.ts` (browser helpers); tests `send.test.ts` (9) and
+  `inbound.test.ts` (24, incl. the full outcome→kind table).
+- `src/app/api/push/{subscriptions,test,dispatch}/route.ts` — new.
+- [public/sw.js](public/sw.js) — VERSION v2; `push`,
+  `notificationclick`, `pushsubscriptionchange`.
+  [sw.test.ts](src/components/pwa/sw.test.ts) +7 cases (badge set/clear,
+  quiet-vs-loud with/without a visible window, non-JSON payload,
+  click focus+navigate vs openWindow).
+- [src/lib/ai/auto-reply.ts](src/lib/ai/auto-reply.ts) —
+  `dispatchInboundToAiReply` returns `AutoReplyAttempt | null` instead
+  of `void`; one assertion in `auto-reply.test.ts` updated from
+  `resolves.toBeUndefined()` to matching the returned attempt.
+- [src/app/api/whatsapp/webhook/route.ts](src/app/api/whatsapp/webhook/route.ts)
+  — captures the attempt, calls `notifyInboundMessage` after the
+  responders (awaited, inside `after()`). `route.test.ts` mocks
+  `@/lib/push/inbound`.
+- [src/hooks/use-app-badge.ts](src/hooks/use-app-badge.ts) — new;
+  wired in the dashboard shell to `totalUnread`.
+- Settings: [push-notifications.tsx](src/components/settings/push-notifications.tsx)
+  (new panel), `settings-sections.ts` (`push`, Account group),
+  `settings/page.tsx`.
+- [scripts/generate-icons.mjs](scripts/generate-icons.mjs) —
+  `badge-96.png` (alpha-only, face cut out via an SVG mask).
+- `messages/{en,es,ko}.json` — `Settings.sections.push`,
+  `Settings.push.*` (37 keys), top-level `Push.*` (12 keys).
+- `.env.local.example` — VAPID + `PUSH_DISPATCH_SECRET` block.
+- `package.json` — `web-push`, `@types/web-push`.
+
+Verified: `npx tsc --noEmit` clean; `npx eslint` on every touched file
+(0 errors/warnings); full `npx vitest run` 972/974 — only the same
+pre-existing, unrelated `date-utils.test.ts` `mondayIndex` timezone
+failures; `next build` lists the three `/api/push/*` routes. The
+alpha-only badge icon was checked by compositing it over a dark
+background (renders as the bot face). **Not verified end to end** — a
+real push needs the VAPID env vars on the deployed host, the migration
+applied, and a physical device; the embedded Browser pane also cannot
+register service workers (see phase 3). Manual, in order: (1) set the
+four env vars on the host and apply migration 040; (2) redeploy; (3)
+on an Android phone (or iPhone with the app installed from Safari)
+open Settings → Push notifications → "Enable on this device" → accept
+→ "Send a test" and expect a notification; (4) message in as a
+customer with the assistant active → expect the icon badge to appear
+with no sound, then trigger a handoff → expect a normal notification
+"<name> needs a person"; (5) optionally create the Supabase Database
+Webhook on `notifications` INSERT → `/api/push/dispatch` with the
+`x-push-secret` header and assign a conversation to yourself from
+another account member → expect a push.

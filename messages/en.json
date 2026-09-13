@@ -1567,6 +1567,43 @@
       "step4_5": "Subscribe to \"messages\" webhook field",
       "metaDocs": "Meta WhatsApp API Documentation"
     },
+    "push": {
+      "title": "Push notifications",
+      "description": "Get notified on this device when a customer writes — even when the app is closed. Enabled per device.",
+      "checking": "Checking this device…",
+      "iosTitle": "Install the app first",
+      "iosStep1": "Open this page in Safari.",
+      "iosStep2": "Tap Share, then \"Add to Home Screen\".",
+      "iosStep3": "Open MlennyChatBot from the Home Screen and come back here to enable notifications.",
+      "unsupportedTitle": "Not supported in this browser",
+      "unsupportedBody": "This browser can't receive push notifications. Try Chrome or Edge, or install the app on your phone.",
+      "notConfiguredTitle": "Not configured on the server",
+      "notConfiguredBody": "The server has no VAPID keys yet. Set NEXT_PUBLIC_VAPID_PUBLIC_KEY, VAPID_PRIVATE_KEY and VAPID_SUBJECT and redeploy.",
+      "noWorkerTitle": "Not available yet",
+      "noWorkerBody": "The app's background worker isn't active in this browser (it only runs in production builds). Reload the page and try again.",
+      "deniedTitle": "Blocked by the browser",
+      "deniedBody": "Notifications are blocked for this site. Allow them in your browser or system settings, then reload.",
+      "disabledTitle": "Off on this device",
+      "disabledBody": "Turn on notifications to hear about new messages while the app is closed.",
+      "enableButton": "Enable on this device",
+      "enabledTitle": "On for this device",
+      "enabledBody": "This device will be notified. Enable it on each phone or computer you use.",
+      "testButton": "Send a test",
+      "disableButton": "Turn off",
+      "enabledToast": "Notifications enabled on this device",
+      "disabledToast": "Notifications turned off on this device",
+      "deniedToast": "Permission was not granted",
+      "enableFailed": "Could not enable notifications",
+      "testFailed": "Could not send the test",
+      "testSent": "Test sent to {count, plural, =1 {1 device} other {# devices}}",
+      "testNoDevice": "No subscribed device found for your account",
+      "whatTitle": "What you'll get",
+      "whatBadge": "A counter on the app icon with the conversations waiting for a reply — including the ones the assistant is answering.",
+      "whatQuiet": "A silent notification when a customer writes and the assistant or a flow already replied.",
+      "whatLoud": "A normal notification when a customer writes and nobody has replied.",
+      "whatAttention": "A notification when the assistant hands a conversation over, hits its reply limit, or fails.",
+      "iosNote": "On iPhone, notifications only work for the app installed on the Home Screen, and iOS turns them off after three ignored in a row."
+    },
     "sections": {
       "overview": "Overview",
       "profile": "Your profile",
@@ -1579,7 +1616,8 @@
       "deals": "Deals & currency",
       "members": "Team members",
       "api": "API keys",
-      "salon-booking": "Salon booking"
+      "salon-booking": "Salon booking",
+      "push": "Push notifications"
     },
     "groups": {
       "account": "Account",
@@ -1850,5 +1888,19 @@
   "Pwa": {
     "updateAvailable": "A new version of MlennyChatBot is ready.",
     "updateAction": "Update"
+  },
+  "Push": {
+    "newMessageTitle": "{name}",
+    "botRepliedTitle": "{name} · assistant replied",
+    "needsAttentionTitle": "{name} needs a person",
+    "reasonHandoff": "The assistant handed this conversation over.",
+    "reasonCapReached": "The assistant reached its reply limit for this conversation.",
+    "reasonRateLimited": "The assistant is rate-limited right now.",
+    "reasonFailed": "The assistant could not reply.",
+    "hiddenNumber": "Hidden number",
+    "mediaPreview": "Sent an attachment",
+    "assignedTitle": "Conversation assigned to you",
+    "testTitle": "MlennyChatBot",
+    "testBody": "Push notifications are working on this device."
   }
 }

@@ -89,13 +89,40 @@ class SandboxRequest {
   }
 }
 
+interface FakeWindowClient {
+  visibilityState: "visible" | "hidden";
+  focus: Mock<() => Promise<void>>;
+  navigate: Mock<(url: string) => Promise<void>>;
+  postMessage: Mock<(message: unknown) => void>;
+}
+
+function windowClient(visibilityState: "visible" | "hidden"): FakeWindowClient {
+  return {
+    visibilityState,
+    focus: vi.fn(async () => undefined),
+    navigate: vi.fn(async () => undefined),
+    postMessage: vi.fn(),
+  };
+}
+
 interface Sandbox {
   self: Sandbox;
   addEventListener: (type: string, handler: Handler) => void;
   caches: FakeCacheStorage;
   fetch: Mock<(request: unknown) => Promise<Response>>;
-  clients: { claim: Mock<() => Promise<undefined>> };
+  clients: {
+    claim: Mock<() => Promise<undefined>>;
+    matchAll: Mock<(query?: unknown) => Promise<FakeWindowClient[]>>;
+    openWindow: Mock<(url: string) => Promise<null>>;
+  };
   skipWaiting: Mock<() => Promise<undefined>>;
+  registration: {
+    showNotification: Mock<(title: string, options: NotificationOptions) => Promise<void>>;
+  };
+  navigator: {
+    setAppBadge: Mock<(count: number) => Promise<void>>;
+    clearAppBadge: Mock<() => Promise<void>>;
+  };
   location: { origin: string };
   Request: typeof SandboxRequest;
   Response: typeof Response;
@@ -114,8 +141,17 @@ function boot() {
     },
     caches: new FakeCacheStorage(),
     fetch: vi.fn(),
-    clients: { claim: vi.fn(async () => undefined) },
+    clients: {
+      claim: vi.fn(async () => undefined),
+      matchAll: vi.fn(async () => []),
+      openWindow: vi.fn(async () => null),
+    },
     skipWaiting: vi.fn(async () => undefined),
+    registration: { showNotification: vi.fn(async () => undefined) },
+    navigator: {
+      setAppBadge: vi.fn(async () => undefined),
+      clearAppBadge: vi.fn(async () => undefined),
+    },
     location: { origin: ORIGIN },
     Request: SandboxRequest,
     Response,
@@ -162,9 +198,9 @@ beforeEach(() => {
 });
 
 describe("sw.js — registers the expected handlers", () => {
-  it("listens for install, activate, message and fetch", () => {
+  it("listens for install, activate, message, fetch and the three push events", () => {
     expect(Object.keys(sandbox.handlers).sort()).toEqual(
-      ["activate", "fetch", "install", "message"],
+      ["activate", "fetch", "install", "message", "notificationclick", "push", "pushsubscriptionchange"],
     );
   });
 });
@@ -177,7 +213,7 @@ describe("sw.js — install", () => {
     const [request] = sandbox.fetch.mock.calls[0] as [SandboxRequest];
     expect(request.url).toBe(`${ORIGIN}/offline`);
     expect(request.cache).toBe("reload");
-    const cached = await sandbox.caches.match("/offline", { cacheName: "mlenny-offline-v1" });
+    const cached = await sandbox.caches.match("/offline", { cacheName: "mlenny-offline-v2" });
     expect(cached).toBeDefined();
   });
 
@@ -191,14 +227,14 @@ describe("sw.js — activate", () => {
   it("drops stale mlenny-* caches, keeps the current ones and foreign ones, then claims clients", async () => {
     await sandbox.caches.open("mlenny-static-v0");
     await sandbox.caches.open("mlenny-offline-v0");
-    await sandbox.caches.open("mlenny-static-v1");
-    await sandbox.caches.open("mlenny-offline-v1");
+    await sandbox.caches.open("mlenny-static-v2");
+    await sandbox.caches.open("mlenny-offline-v2");
     await sandbox.caches.open("someone-elses-cache");
 
     expect(await dispatchExtendable("activate")).toBe(true);
 
     expect((await sandbox.caches.keys()).sort()).toEqual(
-      ["mlenny-offline-v1", "mlenny-static-v1", "someone-elses-cache"],
+      ["mlenny-offline-v2", "mlenny-static-v2", "someone-elses-cache"],
     );
     expect(sandbox.clients.claim).toHaveBeenCalledTimes(1);
   });
@@ -244,7 +280,7 @@ describe("sw.js — fetch: navigations are network-first", () => {
 
   it("serves the precached /offline page when the network throws", async () => {
     const offline = html("<h1>Sin conexión</h1>");
-    (await sandbox.caches.open("mlenny-offline-v1")).entries.set(`${ORIGIN}/offline`, offline);
+    (await sandbox.caches.open("mlenny-offline-v2")).entries.set(`${ORIGIN}/offline`, offline);
     sandbox.fetch.mockRejectedValue(new TypeError("Failed to fetch"));
 
     expect(await dispatchFetch(nav)).toBe(offline);
@@ -283,7 +319,7 @@ describe("sw.js — fetch: /_next/static is cache-first", () => {
     await dispatchFetch(chunk);
     await flush();
 
-    const store = await sandbox.caches.open("mlenny-static-v1");
+    const store = await sandbox.caches.open("mlenny-static-v2");
     expect(store.entries.size).toBe(0);
   });
 
@@ -293,9 +329,115 @@ describe("sw.js — fetch: /_next/static is cache-first", () => {
       await dispatchFetch({ url: `${ORIGIN}/_next/static/chunks/c${i}.js` });
       await flush();
     }
-    const store = await sandbox.caches.open("mlenny-static-v1");
+    const store = await sandbox.caches.open("mlenny-static-v2");
     expect(store.entries.size).toBe(200);
     expect(store.entries.has(`${ORIGIN}/_next/static/chunks/c0.js`)).toBe(false);
     expect(store.entries.has(`${ORIGIN}/_next/static/chunks/c204.js`)).toBe(true);
   });
 });
+
+// ---- Web Push ----------------------------------------------------------
+
+/** A push event carrying a JSON payload, as the browser would build it. */
+const pushEvent = (payload: unknown) => ({
+  data: { json: () => payload, text: () => JSON.stringify(payload) },
+});
+
+describe("sw.js — push", () => {
+  const loud = {
+    type: "needs_attention",
+    title: "Ana necesita a una persona",
+    body: "El asistente derivó esta conversación.",
+    url: "/inbox?c=conv-1",
+    tag: "conv-conv-1",
+    badge: 3,
+  };
+  const quiet = { ...loud, type: "bot_replied", title: "Ana · respondió el asistente", quiet: true };
+
+  it("sets the app badge from the payload and clears it at zero", async () => {
+    await dispatchExtendable("push", pushEvent({ ...loud, badge: 3 }));
+    expect(sandbox.navigator.setAppBadge).toHaveBeenCalledWith(3);
+
+    await dispatchExtendable("push", pushEvent({ ...loud, badge: 0 }));
+    expect(sandbox.navigator.clearAppBadge).toHaveBeenCalledTimes(1);
+  });
+
+  it("shows a notification with tag, url and icons when no app window is visible", async () => {
+    sandbox.clients.matchAll.mockResolvedValue([windowClient("hidden")]);
+    await dispatchExtendable("push", pushEvent(loud));
+
+    expect(sandbox.registration.showNotification).toHaveBeenCalledTimes(1);
+    const [title, options] = sandbox.registration.showNotification.mock.calls[0];
+    expect(title).toBe(loud.title);
+    expect(options).toMatchObject({
+      body: loud.body,
+      tag: loud.tag,
+      silent: false,
+      renotify: true,
+      icon: "/icons/icon-192.png",
+      badge: "/icons/badge-96.png",
+      data: { url: loud.url },
+    });
+  });
+
+  it("delivers a quiet push silently, and drops it entirely when the app is visible", async () => {
+    await dispatchExtendable("push", pushEvent(quiet));
+    expect(sandbox.registration.showNotification.mock.calls[0][1]).toMatchObject({
+      silent: true,
+      renotify: false,
+    });
+
+    sandbox.registration.showNotification.mockClear();
+    const visible = windowClient("visible");
+    sandbox.clients.matchAll.mockResolvedValue([visible]);
+    await dispatchExtendable("push", pushEvent(quiet));
+
+    expect(sandbox.registration.showNotification).not.toHaveBeenCalled();
+    expect(visible.postMessage).toHaveBeenCalledWith({ type: "PUSH_RECEIVED", payload: quiet });
+    // The badge still updates — that is the whole point of a quiet push.
+    expect(sandbox.navigator.setAppBadge).toHaveBeenLastCalledWith(3);
+  });
+
+  it("still shows a loud push when the app is visible (it must make a sound)", async () => {
+    sandbox.clients.matchAll.mockResolvedValue([windowClient("visible")]);
+    await dispatchExtendable("push", pushEvent(loud));
+    expect(sandbox.registration.showNotification).toHaveBeenCalledTimes(1);
+  });
+
+  it("survives a non-JSON payload by showing a generic notification", async () => {
+    await dispatchExtendable("push", {
+      data: {
+        json: () => {
+          throw new SyntaxError("not json");
+        },
+        text: () => "plain text",
+      },
+    });
+    const [title, options] = sandbox.registration.showNotification.mock.calls[0];
+    expect(title).toBe("MlennyChatBot");
+    expect(options).toMatchObject({ body: "plain text", data: { url: "/inbox" } });
+  });
+});
+
+describe("sw.js — notificationclick", () => {
+  const click = (url: string | undefined) => ({
+    notification: { close: vi.fn(), data: url ? { url } : undefined },
+  });
+
+  it("focuses an existing app window and navigates it to the conversation", async () => {
+    const existing = windowClient("hidden");
+    sandbox.clients.matchAll.mockResolvedValue([existing]);
+
+    await dispatchExtendable("notificationclick", click("/inbox?c=conv-1"));
+
+    expect(existing.focus).toHaveBeenCalledTimes(1);
+    expect(existing.navigate).toHaveBeenCalledWith(`${ORIGIN}/inbox?c=conv-1`);
+    expect(sandbox.clients.openWindow).not.toHaveBeenCalled();
+  });
+
+  it("opens a new window when the app is closed, defaulting to the inbox", async () => {
+    await dispatchExtendable("notificationclick", click(undefined));
+    expect(sandbox.clients.openWindow).toHaveBeenCalledWith(`${ORIGIN}/inbox`);
+  });
+});
+

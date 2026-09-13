@@ -63,7 +63,34 @@ function svg(size, { maskable = false } = {}) {
 </svg>`;
 }
 
+/**
+ * Android status-bar badge (the small icon next to the notification
+ * text). Android uses only the alpha channel, so this is white shapes
+ * on transparent with the face cut out — a solid silhouette would just
+ * be a blob.
+ */
+function badgeSvg(size) {
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${size}" viewBox="0 0 512 512">
+  <defs>
+    <mask id="face">
+      <rect width="512" height="512" fill="black"/>
+      <g transform="translate(256 256) scale(0.92) translate(-256 -256)">
+        <circle cx="256" cy="104" r="21" fill="white"/>
+        <rect x="248" y="116" width="16" height="44" rx="8" fill="white"/>
+        <rect x="116" y="152" width="280" height="206" rx="62" fill="white"/>
+        <path d="M176 302 L176 436 L274 344 Z" fill="white"/>
+        <circle cx="200" cy="232" r="27" fill="black"/>
+        <circle cx="312" cy="232" r="27" fill="black"/>
+        <path d="M202 288 Q256 322 310 288" stroke="black" stroke-width="20" stroke-linecap="round" fill="none"/>
+      </g>
+    </mask>
+  </defs>
+  <rect width="512" height="512" fill="#ffffff" mask="url(#face)"/>
+</svg>`;
+}
+
 const targets = [
+  ["public/icons/badge-96.png", badgeSvg(96)],
   ["public/icons/icon-192.png", svg(192)],
   ["public/icons/icon-512.png", svg(512)],
   ["public/icons/icon-maskable-512.png", svg(512, { maskable: true })],

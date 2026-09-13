@@ -76,13 +76,13 @@ const attempt = (
  */
 export async function dispatchInboundToAiReply(
   args: DispatchArgs,
-): Promise<void> {
+): Promise<AutoReplyAttempt | null> {
   let db: SupabaseClient
   try {
     db = supabaseAdmin()
   } catch (err) {
     console.error('[ai auto-reply] dispatch failed:', err)
-    return
+    return null
   }
 
   let result: AutoReplyAttempt | null
@@ -93,7 +93,7 @@ export async function dispatchInboundToAiReply(
     result = attempt('failed', 'unknown_error', describeError(err))
   }
 
-  if (!result) return // account has no auto-reply — nothing to explain
+  if (!result) return null // account has no auto-reply — nothing to explain
   if (result.outcome === 'failed') {
     console.error(
       `[ai auto-reply] ${result.reason} on conversation ${args.conversationId}: ${result.detail ?? ''}`,
@@ -107,6 +107,10 @@ export async function dispatchInboundToAiReply(
     reason: result.reason,
     detail: result.detail ?? null,
   })
+  // Returned (not just logged) so the webhook can pick the right push:
+  // quiet when the bot answered, "needs attention" when it handed off,
+  // capped or failed. See src/lib/push/inbound.ts.
+  return result
 }
 
 /**

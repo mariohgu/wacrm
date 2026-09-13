@@ -11,7 +11,8 @@ import { reopenClosedConversation } from '@/lib/conversations/reopen'
 import { verifyMetaWebhookSignature } from '@/lib/whatsapp/webhook-signature'
 import { runAutomationsForTrigger } from '@/lib/automations/engine'
 import { dispatchInboundToFlows } from '@/lib/flows/engine'
-import { dispatchInboundToAiReply } from '@/lib/ai/auto-reply'
+import { dispatchInboundToAiReply, type AutoReplyAttempt } from '@/lib/ai/auto-reply'
+import { classifyInbound, notifyInboundMessage } from '@/lib/push/inbound'
 import { dispatchWebhookEvent } from '@/lib/webhooks/deliver'
 import {
   handleTemplateWebhookChange,
@@ -921,8 +922,9 @@ async function processMessage(
   // the account has enabled it. Awaited inside `after()` (same reason as
   // the webhook dispatch below); `dispatchInboundToAiReply` owns its
   // eligibility gates + try/catch and never throws.
+  let aiAttempt: AutoReplyAttempt | null | undefined
   if (!flowConsumed && !interactiveReplyId && inboundText.trim()) {
-    await dispatchInboundToAiReply({
+    aiAttempt = await dispatchInboundToAiReply({
       accountId,
       conversationId: conversation.id,
       contactId: contactRecord.id,
@@ -932,6 +934,26 @@ async function processMessage(
       inboundMessageId: insertedRows[0]?.id ?? null,
     })
   }
+
+  // Web Push for this message. Deliberately AFTER the Flow runner and the
+  // AI dispatcher so the notification can say what happened: quiet when
+  // a Flow / the assistant already answered (badge + silent banner),
+  // normal when a human has to reply, "needs attention" when the
+  // assistant handed off, hit its cap or failed. Owns its try/catch,
+  // early-exits when VAPID keys aren't configured, and is awaited for
+  // the same `after()` reason as everything else in this block.
+  await notifyInboundMessage(supabaseAdmin(), {
+    accountId,
+    conversationId: conversation.id,
+    contactId: contactRecord.id,
+    previewText: inboundText,
+    classification: classifyInbound({
+      flowConsumed: !!flowConsumed,
+      interactiveReplyId: interactiveReplyId ?? null,
+      hasText: inboundText.trim().length > 0,
+      aiAttempt,
+    }),
+  })
 
   // message.received webhook (public API). Awaited — not fire-and-forget
   // — because we're inside the route's `after()` block, which only keeps

@@ -7,6 +7,7 @@ import { Sidebar } from "@/components/layout/sidebar";
 import { BottomNav } from "@/components/layout/bottom-nav";
 import { useTotalUnread } from "@/hooks/use-total-unread";
 import { useUnreadNotifications } from "@/hooks/use-unread-notifications";
+import { useAppBadge } from "@/hooks/use-app-badge";
 import { Header } from "@/components/layout/header";
 import { AccountAccessAlert } from "@/components/layout/account-access-alert";
 import { PresenceHeartbeat } from "@/components/presence/presence-heartbeat";
@@ -34,6 +35,10 @@ function DashboardShellInner({ children }: { children: React.ReactNode }) {
   // fanned out as props.
   const totalUnread = useTotalUnread();
   const unreadNotifications = useUnreadNotifications();
+  // App-icon badge (installed app): the same unread-conversations count
+  // the sidebar dot and the mobile tab bar show. The service worker
+  // sets the same number from pushes while the app is closed.
+  useAppBadge(totalUnread);
 
   useEffect(() => {
     if (!loading && !user) {

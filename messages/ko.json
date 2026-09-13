@@ -1567,6 +1567,43 @@
       "step4_5": "\"messages\" 웹훅 필드를 구독",
       "metaDocs": "Meta WhatsApp API 문서"
     },
+    "push": {
+      "title": "푸시 알림",
+      "description": "앱이 닫혀 있어도 고객이 메시지를 보내면 이 기기로 알림을 받습니다. 기기별로 설정합니다.",
+      "checking": "이 기기를 확인하는 중…",
+      "iosTitle": "먼저 앱을 설치하세요",
+      "iosStep1": "이 페이지를 Safari에서 여세요.",
+      "iosStep2": "공유를 누른 뒤 \"홈 화면에 추가\"를 선택하세요.",
+      "iosStep3": "홈 화면에서 MlennyChatBot을 열고 이 화면으로 돌아와 알림을 켜세요.",
+      "unsupportedTitle": "이 브라우저에서는 지원되지 않습니다",
+      "unsupportedBody": "이 브라우저는 푸시 알림을 받을 수 없습니다. Chrome이나 Edge를 사용하거나 휴대폰에 앱을 설치하세요.",
+      "notConfiguredTitle": "서버에 설정되지 않았습니다",
+      "notConfiguredBody": "서버에 VAPID 키가 아직 없습니다. NEXT_PUBLIC_VAPID_PUBLIC_KEY, VAPID_PRIVATE_KEY, VAPID_SUBJECT를 설정한 뒤 다시 배포하세요.",
+      "noWorkerTitle": "아직 사용할 수 없습니다",
+      "noWorkerBody": "이 브라우저에서 앱의 백그라운드 워커가 활성화되지 않았습니다(프로덕션 빌드에서만 실행됩니다). 페이지를 새로고침한 뒤 다시 시도하세요.",
+      "deniedTitle": "브라우저에서 차단됨",
+      "deniedBody": "이 사이트의 알림이 차단되어 있습니다. 브라우저 또는 시스템 설정에서 허용한 뒤 새로고침하세요.",
+      "disabledTitle": "이 기기에서 꺼짐",
+      "disabledBody": "앱이 닫혀 있을 때도 새 메시지를 알 수 있도록 알림을 켜세요.",
+      "enableButton": "이 기기에서 켜기",
+      "enabledTitle": "이 기기에서 켜짐",
+      "enabledBody": "이 기기로 알림이 전송됩니다. 사용하는 휴대폰과 컴퓨터마다 켜 주세요.",
+      "testButton": "테스트 보내기",
+      "disableButton": "끄기",
+      "enabledToast": "이 기기에서 알림을 켰습니다",
+      "disabledToast": "이 기기에서 알림을 껐습니다",
+      "deniedToast": "권한이 허용되지 않았습니다",
+      "enableFailed": "알림을 켤 수 없습니다",
+      "testFailed": "테스트를 보낼 수 없습니다",
+      "testSent": "기기 {count}대에 테스트를 보냈습니다",
+      "testNoDevice": "회원님의 계정에 구독된 기기가 없습니다",
+      "whatTitle": "받게 되는 알림",
+      "whatBadge": "답장을 기다리는 대화 수를 앱 아이콘에 표시합니다. 어시스턴트가 응답 중인 대화도 포함됩니다.",
+      "whatQuiet": "고객이 메시지를 보냈고 어시스턴트나 플로우가 이미 답장한 경우 무음 알림을 보냅니다.",
+      "whatLoud": "고객이 메시지를 보냈는데 아무도 답장하지 않은 경우 일반 알림을 보냅니다.",
+      "whatAttention": "어시스턴트가 대화를 넘기거나, 답장 한도에 도달하거나, 실패한 경우 알림을 보냅니다.",
+      "iosNote": "iPhone에서는 홈 화면에 설치한 앱에서만 알림이 작동하며, 알림을 연속 세 번 무시하면 iOS가 알림을 끕니다."
+    },
     "sections": {
       "overview": "개요",
       "profile": "내 프로필",
@@ -1579,7 +1616,8 @@
       "deals": "딜 & 통화",
       "members": "팀원",
       "api": "API 키",
-      "salon-booking": "살롱 예약"
+      "salon-booking": "살롱 예약",
+      "push": "푸시 알림"
     },
     "groups": {
       "account": "계정",
@@ -1850,5 +1888,19 @@
   "Pwa": {
     "updateAvailable": "MlennyChatBot의 새 버전이 준비되었습니다.",
     "updateAction": "업데이트"
+  },
+  "Push": {
+    "newMessageTitle": "{name}",
+    "botRepliedTitle": "{name} · 어시스턴트가 답장함",
+    "needsAttentionTitle": "{name} 님에게 담당자가 필요합니다",
+    "reasonHandoff": "어시스턴트가 이 대화를 담당자에게 넘겼습니다.",
+    "reasonCapReached": "어시스턴트가 이 대화의 답장 한도에 도달했습니다.",
+    "reasonRateLimited": "어시스턴트가 현재 요청 제한 상태입니다.",
+    "reasonFailed": "어시스턴트가 답장하지 못했습니다.",
+    "hiddenNumber": "숨긴 번호",
+    "mediaPreview": "첨부 파일을 보냈습니다",
+    "assignedTitle": "대화가 회원님에게 배정되었습니다",
+    "testTitle": "MlennyChatBot",
+    "testBody": "이 기기에서 푸시 알림이 정상 작동합니다."
   }
 }

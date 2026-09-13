@@ -266,6 +266,10 @@ vi.mock('@/lib/flows/engine', () => ({
 vi.mock('@/lib/ai/auto-reply', () => ({
   dispatchInboundToAiReply: h.dispatchInboundToAiReply,
 }))
+vi.mock('@/lib/push/inbound', () => ({
+  classifyInbound: vi.fn(() => ({ kind: 'new_message' })),
+  notifyInboundMessage: vi.fn(async () => undefined),
+}))
 vi.mock('@/lib/ai/config', () => ({
   loadTranscriptionEndpoint: h.loadTranscriptionEndpoint,
 }))

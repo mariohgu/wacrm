@@ -416,9 +416,15 @@ describe('dispatchInboundToAiReply — ai_reply_events audit trail', () => {
     expect(event()).toMatchObject({ outcome: 'failed', reason: 'config_error' })
   })
 
-  it('maps an unexpected throw to unknown_error and never rejects', async () => {
+  it('maps an unexpected throw to unknown_error, never rejects, and returns the attempt', async () => {
     h.buildCustomerContext.mockRejectedValue(new Error('db exploded'))
-    await expect(dispatchInboundToAiReply(ARGS)).resolves.toBeUndefined()
+    // The attempt is returned (not just logged) so the webhook can pick
+    // the right push notification for the message — see src/lib/push/inbound.ts.
+    await expect(dispatchInboundToAiReply(ARGS)).resolves.toMatchObject({
+      outcome: 'failed',
+      reason: 'unknown_error',
+      detail: 'db exploded',
+    })
     expect(event()).toMatchObject({
       outcome: 'failed',
       reason: 'unknown_error',
