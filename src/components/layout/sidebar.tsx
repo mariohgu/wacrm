@@ -27,6 +27,7 @@ import {
   Zap,
 } from "lucide-react";
 import type { AccountRole } from "@/lib/auth/roles";
+import { APP_NAME } from "@/lib/brand";
 import { DEFAULT_LANDING_PATH } from "@/lib/navigation";
 
 // Per-role chip metadata used in the sidebar's account strip + the
@@ -192,8 +193,10 @@ export function Sidebar({ open = false, onClose }: SidebarProps) {
             <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-primary text-primary-foreground">
               <MessageSquare className="h-4 w-4" />
             </div>
+            {/* The brand name is a constant, not a message key — it
+                reads the same in every locale. */}
             <span className="text-sm font-semibold text-foreground">
-              {t("title")}
+              {APP_NAME}
             </span>
           </Link>
           <button

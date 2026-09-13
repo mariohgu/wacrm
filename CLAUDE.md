@@ -433,11 +433,21 @@ the **installability + layout** layer only — there is deliberately
   auto-injected. `start_url: "/inbox"`, `display: "standalone"`.
   Colors come from `THEME_COLOR_BY_MODE` (below), not literals.
 - `public/icons/` — `icon-192.png`, `icon-512.png`,
-  `icon-maskable-512.png` (full-bleed, glyph in the 80% safe zone for
-  Android adaptive masks), `apple-touch-icon.png` (180px, square,
-  opaque — iOS applies its own mask). All rendered from the same brand
-  mark as `src/app/icon.tsx` via a one-off `sharp` script (not
-  checked in); regenerate the same way if the mark changes.
+  `icon-maskable-512.png` (full-bleed, glyph scaled into the 80% safe
+  zone for Android adaptive masks), `apple-touch-icon.png` (180px,
+  square, opaque — iOS applies its own mask). All four are rendered by
+  [scripts/generate-icons.mjs](scripts/generate-icons.mjs)
+  (`node scripts/generate-icons.mjs`, run from the repo root so it
+  resolves `sharp` out of the local `node_modules` — it is a transitive
+  dep of `next`, not a direct one). The PNGs are committed; re-run the
+  script and commit the output whenever the mark changes.
+  [src/app/icon.tsx](src/app/icon.tsx) draws the *same* mark
+  independently for the 32px favicon, because Next rasterises that one
+  through Satori rather than sharp — keep the two in step by hand. It
+  deliberately differs twice for legibility at that size: the gradient
+  is a CSS `background-image` on the wrapper div (Satori handles CSS
+  gradients more reliably than nested SVG `<defs>`), and the bot's
+  antenna is dropped because its stem lands on a single pixel.
 - [src/lib/themes.ts](src/lib/themes.ts) — `THEME_COLOR_BY_MODE`
   (`dark: "#05070b"`, `light: "#fbfcfd"`): sRGB hex of the two
   `--background` oklch tokens in `globals.css`. **Must be kept in sync
@@ -485,6 +495,19 @@ the **installability + layout** layer only — there is deliberately
 - [next.config.ts](next.config.ts) — CSP (still report-only) gains
   `worker-src 'self' blob:` (covers the existing opus encoder worker
   and the future service worker).
+- **The product's display name is `APP_NAME`**
+  ([src/lib/brand.ts](src/lib/brand.ts), currently `"MlennyChatBot"`) —
+  used by the `<title>` default and template, the manifest's `name` /
+  `short_name`, the iOS web-app title, and the sidebar logo. It is a
+  constant rather than a message key on purpose: a brand name is the
+  same in every locale, so three copies in `messages/*.json` could only
+  drift. That module's own comment lists the machine-facing identifiers
+  that still spell `wacrm` and must NOT be renamed with it — the
+  `wacrm_live_` API-key prefix (keys are stored hashed, so a rename
+  invalidates every issued key), the `X-Wacrm-Signature` webhook
+  header, the `wacrm.*` / `wacrm:*` localStorage keys (renaming resets
+  every user's saved theme and panel state), and `package.json` /
+  README, which identify the fork rather than the running app.
 - **The app's landing route is the Inbox, not the Dashboard.**
   [src/lib/navigation.ts](src/lib/navigation.ts)'s `DEFAULT_LANDING_PATH`
   is the single source of truth, consumed by the root route
@@ -1491,3 +1514,66 @@ header sits below the status bar / notch, (c) the inbox composer sits
 above the home indicator and rises with the keyboard, (d) switching
 light/dark in-app recolors the Android status bar. Tailwind's
 `h-dvh` needs iOS 15.4+ / Chrome 108+, which every current phone has.
+
+## 2026-09-12 — Composer layout, rename to MlennyChatBot, new icon
+
+Three requests in one pass, all cosmetic/branding — no schema, no
+engine, no send-path logic touched.
+
+**1. Composer is two rows.** The inbox composer
+([message-composer.tsx](src/components/inbox/message-composer.tsx)) put
+six controls on a single `flex items-end gap-2` row: four icon buttons,
+the textarea, and Send. At 375px that left the textarea about 110px
+wide — a few characters visible while typing. Split into a
+`flex flex-col gap-2` wrapper holding two rows: the textarea and Send
+on the first (the field gets the whole width, `items-end` still pins
+Send to the bottom edge as the textarea grows), and the attach menu,
+the `+` menu, templates and the AI-draft button on the second. The
+`draftHint` paragraph moved from its own line below the composer into
+the toolbar row as a right-aligned `ml-auto min-w-0 truncate` element,
+so the restructure costs no extra vertical space (it truncates on a
+narrow screen instead of taking a third row away from the message
+list). Its old `pl-[5.5rem]` — hand-measured to clear the four buttons
+that used to precede the textarea — is gone with them. Rendering
+conditions are unchanged: the old hint was gated on
+`!draft && !recording`, which is exactly the ternary branch the toolbar
+row now lives in.
+
+**2. Renamed to MlennyChatBot.** New `APP_NAME` constant (see the
+brand bullet in the PWA section above for the full rename boundary).
+Also renamed in prose where the copy names the product to the user: 6
+strings per locale in `messages/{en,es,ko}.json`, the two
+`'our wacrm account'` fallbacks in
+[invite-member-dialog.tsx](src/components/settings/invite-member-dialog.tsx),
+and the duplicate-phone-number error in
+[api/whatsapp/config/route.ts](src/app/api/whatsapp/config/route.ts).
+`Sidebar.title` was **deleted** from all three locale files rather than
+retranslated — it held a tagline ("CRM Template for WhatsApp"), and the
+logo now renders `APP_NAME`; the parity test covers the removal. The
+Korean strings needed no particle rework: `wacrm` and
+`MlennyChatBot` both end in a consonant, so 으로/이 stay correct.
+
+**3. New icon.** Replaced the flat violet square + outlined chat glyph
+with a violet→fuchsia gradient squircle carrying a white speech bubble
+that doubles as a bot face (antenna, two eyes, smile) — "more
+eye-catching" as asked, and it now says *chat bot* rather than
+*generic chat*. Added
+[scripts/generate-icons.mjs](scripts/generate-icons.mjs) so the four
+PNGs are reproducible instead of being a one-off from the previous
+session, and rewrote [src/app/icon.tsx](src/app/icon.tsx) to match.
+
+Verified: `npx tsc --noEmit` clean; `npx eslint` on every touched file
+(0 errors/warnings); `npx vitest run src/i18n/messages.test.ts` (4/4 —
+confirms the `Sidebar.title` removal is consistent across all three
+locales and that no orphan was left); full `npx vitest run` (898/900 —
+only the same pre-existing, unrelated `date-utils.test.ts`
+`mondayIndex` timezone failures); `next build` succeeds. The composer's
+two-row layout was checked visually at 375px and at desktop width
+against a static mock using the component's own class names (the real
+inbox needs a Supabase login this session did not have) — the field
+spans the full width on a phone, Send stays bottom-aligned against a
+three-line message, and the hint truncates rather than wrapping. Not
+verified in the real app — manual recommended: open a conversation and
+confirm the two rows, then reinstall the PWA on a phone to pick up the
+new icon and name (an already-installed home-screen shortcut keeps the
+old icon until it is removed and re-added).

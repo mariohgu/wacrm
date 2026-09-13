@@ -1,4 +1,5 @@
 import type { MetadataRoute } from "next";
+import { APP_NAME } from "@/lib/brand";
 import { DEFAULT_LANDING_PATH } from "@/lib/navigation";
 import { DEFAULT_MODE, THEME_COLOR_BY_MODE } from "@/lib/themes";
 
@@ -14,8 +15,11 @@ import { DEFAULT_MODE, THEME_COLOR_BY_MODE } from "@/lib/themes";
 export default function manifest(): MetadataRoute.Manifest {
   return {
     id: "/",
-    name: "wacrm",
-    short_name: "wacrm",
+    name: APP_NAME,
+    // Same as `name`: the home-screen label. Android ellipsises past
+    // roughly a dozen characters, which is the trade-off for keeping
+    // the full brand rather than an abbreviation.
+    short_name: APP_NAME,
     description: "Shared WhatsApp inbox, contacts, pipelines and automations.",
     // Same destination the root route and the post-sign-in redirect
     // use; the middleware still bounces signed-out users to /login.
