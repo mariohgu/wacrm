@@ -28,6 +28,8 @@
     "beta": "Beta",
     "unreadConversations": "{count} {count, plural, =1 {conversación sin leer} other {conversaciones sin leer}}",
     "unreadNotifications": "{count} {count, plural, =1 {notificación sin leer} other {notificaciones sin leer}}",
+    "more": "Más",
+    "mobileNav": "Navegación principal",
     "roleOwner": "Propietario",
     "roleAdmin": "Administrador",
     "roleAgent": "Agente",

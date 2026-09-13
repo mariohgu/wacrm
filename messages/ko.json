@@ -28,6 +28,8 @@
     "beta": "베타",
     "unreadConversations": "읽지 않은 대화 {count}건",
     "unreadNotifications": "읽지 않은 알림 {count}건",
+    "more": "더보기",
+    "mobileNav": "기본 탐색",
     "roleOwner": "소유자",
     "roleAdmin": "관리자",
     "roleAgent": "상담원",

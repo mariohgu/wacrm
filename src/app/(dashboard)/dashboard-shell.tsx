@@ -1,9 +1,12 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { Suspense, useCallback, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { AuthProvider, useAuth } from "@/hooks/use-auth";
 import { Sidebar } from "@/components/layout/sidebar";
+import { BottomNav } from "@/components/layout/bottom-nav";
+import { useTotalUnread } from "@/hooks/use-total-unread";
+import { useUnreadNotifications } from "@/hooks/use-unread-notifications";
 import { Header } from "@/components/layout/header";
 import { AccountAccessAlert } from "@/components/layout/account-access-alert";
 import { PresenceHeartbeat } from "@/components/presence/presence-heartbeat";
@@ -20,6 +23,16 @@ function DashboardShellInner({ children }: { children: React.ReactNode }) {
   // always visible and this stays at `false` (ignored by the component).
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const closeSidebar = useCallback(() => setSidebarOpen(false), []);
+  const openSidebar = useCallback(() => setSidebarOpen(true), []);
+
+  // Unread counters live here, not in the components that display
+  // them: the sidebar and the mobile bottom nav both show them, and
+  // each hook opens a fixed-name realtime channel that realtime-js
+  // dedupes by topic — two subscribers would share one channel and the
+  // first to unmount would remove it for both. One subscription each,
+  // fanned out as props.
+  const totalUnread = useTotalUnread();
+  const unreadNotifications = useUnreadNotifications();
 
   useEffect(() => {
     if (!loading && !user) {
@@ -50,12 +63,17 @@ function DashboardShellInner({ children }: { children: React.ReactNode }) {
       {/* Reports this tab's online/away presence once we know a user is
           signed in. Headless — renders nothing. */}
       <PresenceHeartbeat />
-      <Sidebar open={sidebarOpen} onClose={closeSidebar} />
+      <Sidebar
+        open={sidebarOpen}
+        onClose={closeSidebar}
+        totalUnread={totalUnread}
+        unreadNotifications={unreadNotifications}
+      />
       {/* pb-[--safe-bottom]: keeps the bottom of the content column (the
           inbox composer in particular) above the home indicator when the
           app runs installed on a phone. 0px in a browser tab. */}
       <div className="flex flex-1 flex-col overflow-hidden pb-[var(--safe-bottom)]">
-        <Header onOpenSidebar={() => setSidebarOpen(true)} />
+        <Header onOpenSidebar={openSidebar} />
         {/* Thinner horizontal padding on mobile so cards have room to breathe. */}
         <main className="flex-1 overflow-y-auto p-4 sm:p-6">
           {/* Above every page: writes are being rejected and here's why.
@@ -63,6 +81,18 @@ function DashboardShellInner({ children }: { children: React.ReactNode }) {
           <AccountAccessAlert />
           {children}
         </main>
+        {/* Mobile tab bar — in flow (not fixed) so <main> shrinks to
+            make room and nothing renders underneath it. Hidden at lg+
+            and while an inbox thread is open. Suspense: it reads
+            useSearchParams(), which needs a boundary or the production
+            build bails the whole shell to client rendering. */}
+        <Suspense fallback={null}>
+          <BottomNav
+            onOpenMenu={openSidebar}
+            totalUnread={totalUnread}
+            unreadNotifications={unreadNotifications}
+          />
+        </Suspense>
       </div>
     </div>
   );

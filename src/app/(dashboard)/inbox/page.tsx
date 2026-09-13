@@ -561,12 +561,14 @@ function InboxPageInner() {
   // before, unchanged.
   const hasActiveConv = !!activeConversation;
 
-  // Full visible height minus the header (3.5rem + top safe-area, see
-  // header.tsx) and the shell's bottom safe-area padding. dvh rather
-  // than vh so mobile Safari's toolbars don't push the composer
-  // off-screen.
+  // Fill <main> exactly: its content box is 100%, and the negative
+  // margins that cancel its p-4 / sm:p-6 padding are added back so the
+  // panels reach its edges. Sizing off the parent (rather than a
+  // 100dvh-minus-header calc) means whatever the shell stacks above or
+  // below <main> — header, safe-area insets, the mobile bottom nav —
+  // is accounted for automatically, with nothing here to keep in sync.
   return (
-    <div className="-m-4 flex h-[calc(100dvh-3.5rem-var(--safe-top)-var(--safe-bottom))] flex-col overflow-hidden sm:-m-6">
+    <div className="-m-4 flex h-[calc(100%+2rem)] flex-col overflow-hidden sm:-m-6 sm:h-[calc(100%+3rem)]">
       {/* WhatsApp connection banner — in the flex column, not absolute,
           so it pushes the panels down instead of overlapping them. */}
       {whatsappConnected === false && (

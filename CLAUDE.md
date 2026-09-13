@@ -471,9 +471,9 @@ started.
 The app is installable as a Progressive Web App ("Add to Home Screen"
 on iOS Safari, the install prompt on Android Chrome) and, once
 installed, opens standalone (no browser chrome). What exists today is
-the **installability + layout** layer only — there is deliberately
-**no service worker and no push** yet (see the phased plan in the
-2026-09-12 change-log entry; those are later phases).
+the **installability + layout + mobile navigation** layer — there is
+deliberately **no service worker and no push** yet (see the phased
+plan in the 2026-09-12 change-log entry; those are later phases).
 
 - [src/app/manifest.ts](src/app/manifest.ts) — Next's file convention,
   served at `/manifest.webmanifest` with the `<link rel="manifest">`
@@ -519,11 +519,50 @@ the **installability + layout** layer only — there is deliberately
   (`env(safe-area-inset-*, 0px)`). The header and the sidebar's logo
   row are `h-[calc(3.5rem+var(--safe-top))]` + `pt-[var(--safe-top)]`;
   the dashboard shell's content column and the sidebar footer pad by
-  `--safe-bottom`. The inbox's fixed height is
-  `calc(100dvh - 3.5rem - var(--safe-top) - var(--safe-bottom))` —
-  **these three places encode the same header height and must change
-  together.** All resolve to 0px in a normal browser tab, so desktop is
-  visually unchanged.
+  `--safe-bottom`. All resolve to 0px in a normal browser tab, so
+  desktop is visually unchanged.
+- **The inbox fills `<main>`, it does not size itself off the
+  viewport.** [inbox/page.tsx](<src/app/(dashboard)/inbox/page.tsx>)'s
+  root is `-m-4 h-[calc(100%+2rem)] sm:-m-6 sm:h-[calc(100%+3rem)]`:
+  100% of `<main>`'s content box plus the padding the negative margins
+  cancel. It used to be a `100dvh − 3.5rem − safe-areas` calc that had
+  to be kept in sync with the header by hand, and would have needed a
+  further term for the bottom tab bar; sizing off the parent means
+  whatever the shell stacks above or below `<main>` is accounted for
+  automatically. Relies on the flexbox rule that a flex item's
+  post-flex size is definite for percentage resolution (the shell is
+  `h-dvh` → stretched column → `flex-1` main) — verified in Chromium at
+  375px and 1100px: `<main>` never scrolls and the inbox's bottom edge
+  lands exactly on the tab bar's top edge. Keep the two paddings in
+  step with `<main>`'s `p-4 sm:p-6` if that ever changes.
+- **Mobile bottom tab bar**
+  ([src/components/layout/bottom-nav.tsx](src/components/layout/bottom-nav.tsx))
+  — primary navigation below `lg`: Inbox, Contacts, Pipelines,
+  Notifications, plus "More", which opens the same sidebar drawer the
+  header hamburger does (so every section stays reachable; the header
+  hamburger is kept as a second affordance). Rendered by the dashboard
+  shell as the last in-flow child of the content column (not
+  `position: fixed`), so `<main>` shrinks to make room and nothing is
+  ever hidden underneath it; `lg:hidden` at desktop widths. It returns
+  `null` while an inbox thread is open, detected from the URL
+  (`/inbox?c=<id>` — the inbox already mirrors its selection there via
+  `router.replace` and clears it on back), so the thread and composer
+  get the full height without any new state plumbing. It reads
+  `useSearchParams()`, hence the `<Suspense>` boundary around it in the
+  shell (a production build otherwise bails the shell to CSR). "More"
+  is styled active when no tab matches the route (Dashboard,
+  Broadcasts, Settings…). Labels reuse the `Sidebar.*` message keys plus
+  two new ones, `Sidebar.more` and `Sidebar.mobileNav`.
+- **Unread counters are owned by the shell, not the nav components.**
+  `useTotalUnread()` and `useUnreadNotifications()` are called once in
+  [dashboard-shell.tsx](<src/app/(dashboard)/dashboard-shell.tsx>) and
+  passed as required props to both `Sidebar` and `BottomNav`. Each hook
+  opens a fixed-name realtime channel (`total-unread-realtime`,
+  `notifications-unread-count`), and `realtime-js` dedupes channels by
+  topic on the singleton client — two components each calling the hook
+  would share one channel and the first to unmount would
+  `removeChannel` it for both. Don't move the hooks back into the
+  components.
 - `h-screen`/`min-h-screen`/`100vh` → `h-dvh`/`min-h-dvh`/`100dvh`
   across the shell, inbox, auth pages, join layout and the automation
   editor's loading states. On mobile Safari `100vh` is the
@@ -568,8 +607,7 @@ the **installability + layout** layer only — there is deliberately
   `src/middleware.test.ts` asserts against the constant, not a
   literal, so flipping it does not break the test.
 
-Not yet done, in intended order: bottom tab bar for `<lg` (replacing
-the hamburger-drawer as primary mobile nav), a minimal hand-written
+Not yet done, in intended order: a minimal hand-written
 `public/sw.js` (network-first, `Cache-Control: no-cache` header rule
 for it in `next.config.ts` — the current `s-maxage=300` rule would
 otherwise pin stale workers), then Web Push (`push_subscriptions`
@@ -1726,3 +1764,63 @@ watch Agents → Usage → "Actividad de respuestas automáticas" fill in.
 > the auto-reply still works exactly as before — `logAiReplyEvent`
 > swallows the missing-table error — but the banner shows no counter /
 > last-attempt line and the activity card stays empty.
+
+## 2026-09-13 — PWA phase 2: mobile bottom tab bar
+
+Third PWA phase from the 2026-09-12 plan (0: installable, 1:
+standalone-safe layout — both shipped and committed as "webapp inicio";
+2: this). The hamburger-drawer was the only mobile navigation, which is
+the single biggest "this is a website" tell on a phone. See the new
+bullets in the **PWA / installed-app baseline** section above for the
+durable description; this entry covers what changed and why.
+
+Touched:
+
+- [src/components/layout/bottom-nav.tsx](src/components/layout/bottom-nav.tsx)
+  — new. Four tabs + "More" (opens the existing drawer). Hidden at
+  `lg+` and while `/inbox?c=` is set. Inbox unread dot and
+  notifications count pill mirror the sidebar's.
+- [src/app/(dashboard)/dashboard-shell.tsx](<src/app/(dashboard)/dashboard-shell.tsx>)
+  — mounts `BottomNav` under `<main>` inside a `<Suspense>`; now calls
+  the two unread hooks itself and fans the counts out to `Sidebar` and
+  `BottomNav` as props (one realtime subscription each instead of a
+  shared channel torn down by whichever unmounts first — see the
+  section above). `openSidebar` extracted as a stable callback shared by
+  the header hamburger and the "More" tab.
+- [src/components/layout/sidebar.tsx](src/components/layout/sidebar.tsx)
+  — `totalUnread` / `unreadNotifications` become required props; the
+  two hook calls and imports are gone. Rendering unchanged.
+- [src/app/(dashboard)/inbox/page.tsx](<src/app/(dashboard)/inbox/page.tsx>)
+  — root height switched from the `100dvh − 3.5rem − safe-areas` calc
+  to `calc(100% + padding)` of `<main>`. This was forced by the tab
+  bar: with the bar in flow the old calc overshot `<main>` by the bar's
+  height and `<main>` would have scrolled by that much on the list
+  view. Sizing off the parent removes the "three places in sync" rule
+  the previous entry documented, rather than adding a fourth term.
+- `messages/en.json`, `es.json`, `ko.json` — `Sidebar.more` ("More" /
+  "Más" / "더보기") and `Sidebar.mobileNav` (the `<nav aria-label>`).
+
+Not changed, on purpose: the header hamburger stays (a second way into
+the drawer costs nothing and is the only menu affordance when the tab
+bar is hidden behind an open thread — though there the back button is
+the primary control); the flows/automations editors keep the bar (they
+are not full-screen canvases on a phone anyway).
+
+Verified: `npx tsc --noEmit` clean; `npx eslint` on every touched file
+(0 errors, 1 pre-existing `toast` unused-import warning in
+`inbox/page.tsx` on an untouched line); `npx vitest run` (914/916 —
+only the same pre-existing, unrelated `date-utils.test.ts`
+`mondayIndex` timezone failures; the locale parity test covers the two
+new keys); `next build` succeeds — the `useSearchParams` boundary holds,
+no CSR bail-out. Layout verified in Chromium against a static mock
+that reproduces the shell → main → inbox → bottom-nav structure with
+the components' own class names: at 375×812 `<main>` has
+`scrollHeight === clientHeight` (no page scroll), the inbox's bottom
+edge equals the tab bar's top edge to the pixel, and the conversation
+list scrolls internally; at 1100px the bar is `display: none` and the
+inbox's bottom edge equals `<main>`'s. Not verified in the real app
+(no Supabase login this session) — manual recommended on a phone:
+open the installed app, confirm the five tabs and their badges, tap a
+conversation and confirm the bar disappears and the composer sits at
+the bottom, press back and confirm it returns, and tap "More" to
+confirm the drawer opens.
