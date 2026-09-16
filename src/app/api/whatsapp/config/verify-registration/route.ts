@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server'
 import { createClient } from '@/lib/supabase/server'
+import { getVerifiedUserId } from '@/lib/auth/verified-user'
 import { decrypt } from '@/lib/whatsapp/encryption'
 import {
   getSubscribedApps,
@@ -30,11 +31,8 @@ import {
  */
 export async function GET() {
   const supabase = await createClient()
-  const {
-    data: { user },
-    error: authError,
-  } = await supabase.auth.getUser()
-  if (authError || !user) {
+  const userId = await getVerifiedUserId(supabase)
+  if (!userId) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
   }
 
@@ -44,7 +42,7 @@ export async function GET() {
   const { data: profile } = await supabase
     .from('profiles')
     .select('account_id')
-    .eq('user_id', user.id)
+    .eq('user_id', userId)
     .maybeSingle()
   const accountId = profile?.account_id as string | undefined
   if (!accountId) {

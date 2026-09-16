@@ -46,6 +46,58 @@ adding a new key to `en.json` without updating `ko.json`/`es.json` fails it
 immediately, which is much faster feedback than finding a raw key string in
 the UI later.
 
+## Server-side auth check (`src/lib/auth/verified-user.ts`)
+
+**Never call `supabase.auth.getUser()` in the middleware or in a route
+handler.** It is a network round trip to `/auth/v1/user` on every call,
+and Supabase rate-limits that endpoint **per source IP: 30 requests / 5
+minutes** (bursts of 30). This deployment runs on **Hostinger** (a single
+Node server behind one egress IP — `/home/u463106032/domains/
+wsp.mlenny.pe/…` in the runtime log, *not* Vercel), so every visitor's
+server-side checks share one bucket. On 2026-09-16 one signed-in user
+produced 77 `/auth/v1/user` calls in 7 minutes (21 in a single second
+on an inbox load: the middleware ran on each of ~15 nav-link prefetches
+plus the API calls, and each API route re-checked with `getUser()`),
+Supabase answered `429 over_request_rate_limit`, `getUser()` returned no
+user, and the middleware bounced the user to `/login`.
+
+- `getVerifiedUserId(supabase)` is the one server-side identity check:
+  `auth.getClaims()` verifies the access token **locally** with
+  WebCrypto against the project JWKS (cached 10 min process-wide) when
+  the project uses **asymmetric JWT signing keys** (Dashboard → Project
+  Settings → JWT Keys; ES256 is the default for new projects, older
+  projects must migrate off the legacy HS256 secret). On HS256 it falls
+  back to `getUser()` internally, so it is never worse than before.
+  Session refresh is unchanged (it goes through `getSession()`, which
+  rotates an expired token and writes cookies via `setAll` exactly like
+  `getUser()` did — the middleware's `withRefreshedCookies` still
+  applies). Used by `src/middleware.ts`, `getCurrentAccount` /
+  `requireRole` (`account.ts`), and the four `/api/whatsapp/*` routes
+  that used to call `getUser()` directly (config, verify-registration,
+  media proxy — one call **per image rendered** — and templates/[id]).
+  Dependency-free (no `next/headers`) so the Edge middleware can import
+  it.
+- The middleware **skips router prefetches** (`Next-Router-Prefetch: 1`,
+  `Purpose/Sec-Purpose: prefetch`) entirely — RSC payloads of the
+  dashboard carry no user data (every page is a client component that
+  loads under RLS after mount, and `dashboard-shell.tsx` redirects to
+  `/login` with no session), and a real navigation never carries those
+  headers, so it is still gated.
+- The middleware matcher **excludes `/api/`**. Every route handler
+  authenticates itself (`requireRole` / `getCurrentAccount` /
+  `getVerifiedUserId` for dashboard routes, `requireApiKey` for
+  `/api/v1`, `AUTOMATION_CRON_SECRET` for the cron routes,
+  `PUSH_DISPATCH_SECRET` for push dispatch, Meta's signature for the
+  webhook; `invitations/[token]/peek` is public by design), and a route
+  handler can write refreshed cookies itself, so nothing was lost — only
+  the duplicate check. `src/middleware.test.ts` pins the prefetch
+  pass-through and the matcher.
+- Browser-side `getUser()`/`getSession()` calls (client components,
+  hooks) are fine: they leave from the visitor's own IP.
+- Still worth doing in the dashboard, not code: raise **Authentication →
+  Rate Limits** if the plan allows, and migrate to asymmetric JWT keys
+  so `getClaims()` is truly local.
+
 ## AI reply assistant (`src/lib/ai/`)
 
 Bring-your-own-key LLM integration powering AI-drafted replies (inbox),
@@ -2164,3 +2216,92 @@ lists `/api/push/diagnostics`. Not verified against the deployed app —
 the user is to deploy, open Settings → Push notifications, apply the
 waiting update if the card shows one, run "Send a test", then run
 "Diagnostics" → "Copy result" and paste it back.
+
+## 2026-09-16 — Auth 429s: stop calling `getUser()` on every request; harden function grants
+
+User shared server logs full of `AuthApiError: Request rate limit
+reached (429, over_request_rate_limit)` in bursts of 14 within ~700 ms,
+plus a Supabase Security Advisor screenshot (44 warnings, mostly
+"signed-in users / public can execute SECURITY DEFINER function"). The
+two are unrelated; see the new **Server-side auth check** section above
+for the durable explanation of the first.
+
+Diagnosis, from the user's exported Supabase log (100 entries, 8 min)
+and the host's runtime log:
+
+- **77 of the 100 Supabase entries were `GET /auth/v1/user` with
+  user-agent `Next.js Middleware`, one user, 21 of them in a single
+  second** — an inbox load (≈15 nav-link prefetches + API calls, the
+  middleware on each) — against a per-IP limit of 30 / 5 min. The app
+  is on **Hostinger, not Vercel** (single egress IP), so the whole
+  installation shares one bucket. The bare `AuthApiError` print comes
+  from auth-js's own `console.error` in its session-recovery path.
+- Side effects visible in the same logs, not fixed here: **504s** on
+  `/rest/v1/profiles` and `/rest/v1/conversations` during the burst;
+  the Node process restarted **20 times** in the captured window
+  (Hostinger's process manager — cause unknown); 4×
+  `[ai auto-reply] provider_error … OpenRouter returned an empty
+  response` (the bot went quiet on those threads; surfaced in the
+  banner via `ai_reply_events`); 10× `Error in WhatsApp media GET …
+  Object with ID '1539980211189278' does not exist` (same media id
+  every time — an expired Meta media id being re-fetched, the item
+  flagged and deferred on 2026-08-23). Push delivery itself worked
+  (`[push] delivered … failed=0`).
+
+Touched:
+
+- [src/lib/auth/verified-user.ts](src/lib/auth/verified-user.ts) — new,
+  `getVerifiedUserId` (`auth.getClaims()`; local JWT verification with
+  asymmetric keys, `getUser()` fallback on HS256).
+- [src/middleware.ts](src/middleware.ts) — uses the helper; passes
+  router prefetches through untouched; matcher excludes `/api/`; the
+  now-redundant `/api/whatsapp/*` 401 branch removed (every one of those
+  routes checks auth itself — verified route by route).
+- [src/lib/auth/account.ts](src/lib/auth/account.ts) —
+  `getCurrentAccount` uses the helper (so every `requireRole` route
+  stops hitting `/auth/v1/user`).
+- [src/app/api/whatsapp/config/route.ts](src/app/api/whatsapp/config/route.ts),
+  [verify-registration/route.ts](src/app/api/whatsapp/config/verify-registration/route.ts),
+  [media/[mediaId]/route.ts](<src/app/api/whatsapp/media/[mediaId]/route.ts>),
+  [templates/[id]/route.ts](<src/app/api/whatsapp/templates/[id]/route.ts>)
+  — the seven direct `getUser()` blocks replaced with the helper.
+- [supabase/migrations/040_harden_function_grants.sql](supabase/migrations/040_harden_function_grants.sql)
+  — **new migration, must be applied**: `merge_contacts`,
+  `claim_ai_reply_slot`, `record_webhook_failure` become
+  `service_role`-only (the linter showed `merge_contacts` as callable by
+  signed-in users on the live DB even though 039b grants it to
+  `service_role` only — an earlier draft was probably applied; 029/028
+  never revoked the PUBLIC default at all); the two one-off dedup sweeps
+  lose EXECUTE for every app role; `touch_presence`, `set_member_role`,
+  `remove_account_member`, `transfer_account_ownership`,
+  `redeem_invitation` are revoked from `anon`/PUBLIC and explicitly
+  granted to `authenticated` (touch_presence relied on the PUBLIC
+  default). `is_account_member`, `peek_invitation` and trigger
+  functions deliberately untouched (see the migration header).
+- Tests: `middleware.test.ts` (mock ported to `getClaims`; three new
+  cases — prefetch never reaches auth, a real navigation is still
+  gated, the matcher rejects `/api/*`), `account.test.ts` and
+  `api/whatsapp/send/route.test.ts` (mocks ported).
+
+Not changed, by design: browser-side `getUser`/`getSession` calls
+(visitor's own IP); `join/[token]/page.tsx`'s server `getUser()` (one
+call per invite landing, negligible); Prettier formatting of the
+touched files (they were not Prettier-clean before either — the repo
+does not enforce it — so no reformat, to keep the diff reviewable).
+
+Verified: `npx tsc --noEmit` clean; `npx eslint` on every touched file
+(0 errors, 1 pre-existing `options` unused warning in the middleware's
+`setAll`); `npx vitest run` on the three touched test files (19/19) and
+the full suite (976/978 — only the same pre-existing, unrelated
+`date-utils.test.ts` `mondayIndex` timezone failures); `next build`
+succeeds (run with placeholder `NEXT_PUBLIC_SUPABASE_*` values — this
+machine has no `.env.local`; without any value the prerender of the
+auth pages fails before the build finishes, unrelated to this change).
+Next 16 also warns that the `middleware` file convention is deprecated
+in favour of `proxy` — pre-existing, left for a separate change. Not verified against the deployed host —
+manual, in order: (1) apply migration 040 in the SQL Editor and press
+"Rerun linter" in the Security Advisor; (2) deploy; (3) open the inbox,
+navigate around, then check Supabase → Logs → Auth: `/auth/v1/user`
+calls from `Next.js Middleware` should drop from dozens per page load
+to at most a handful (zero once the project is on asymmetric JWT keys);
+(4) confirm nobody is bounced to `/login` mid-session any more.

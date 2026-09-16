@@ -12,8 +12,11 @@
 //
 // Calling convention
 // ------------------
-// API routes don't need to redo `supabase.auth.getUser()` — they
-// receive a fully-loaded context from `requireRole`:
+// API routes don't need to redo the session check — they receive a
+// fully-loaded context from `requireRole`. The check itself is
+// `getVerifiedUserId` (local JWT verification, see `./verified-user`),
+// NOT `supabase.auth.getUser()` — that one is a rate-limited network
+// round trip per call and must not come back here:
 //
 //   try {
 //     const ctx = await requireRole("admin");
@@ -29,6 +32,7 @@ import { NextResponse } from "next/server";
 import type { SupabaseClient } from "@supabase/supabase-js";
 
 import { createClient } from "@/lib/supabase/server";
+import { getVerifiedUserId } from "./verified-user";
 import { hasMinRole, isAccountRole, type AccountRole } from "./roles";
 
 // ------------------------------------------------------------
@@ -106,18 +110,15 @@ export interface AccountContext {
 export async function getCurrentAccount(): Promise<AccountContext> {
   const supabase = await createClient();
 
-  const {
-    data: { user },
-    error: userErr,
-  } = await supabase.auth.getUser();
-  if (userErr || !user) {
+  const userId = await getVerifiedUserId(supabase);
+  if (!userId) {
     throw new UnauthorizedError();
   }
 
   const { data, error } = await supabase
     .from("profiles")
     .select("account_id, account_role")
-    .eq("user_id", user.id)
+    .eq("user_id", userId)
     .maybeSingle();
 
   if (error) {
@@ -165,7 +166,7 @@ export async function getCurrentAccount(): Promise<AccountContext> {
 
   return {
     supabase,
-    userId: user.id,
+    userId,
     accountId: data.account_id,
     role: data.account_role,
     account: { id: account.id, name: account.name },
