@@ -20,7 +20,10 @@ vi.mock('@/lib/supabase/server', async () => {
   return {
     createClient: async () => ({
       ...createFakeDb(h.tables as FakeTables),
-      auth: { getUser: async () => ({ data: { user: { id: 'u-1' } } }) },
+      auth: {
+        getUser: async () => ({ data: { user: { id: 'u-1' } } }),
+        getClaims: async () => ({ data: { claims: { sub: 'u-1' } }, error: null }),
+      },
     }),
   }
 })

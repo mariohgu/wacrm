@@ -51,6 +51,7 @@ function makeSupabaseMock() {
   return {
     auth: {
       getUser: vi.fn(async () => ({ data: { user: { id: 'user-1' } }, error: null })),
+      getClaims: vi.fn(async () => ({ data: { claims: { sub: 'user-1' } }, error: null })),
     },
     from: vi.fn((table: string) => builder(table)),
   }

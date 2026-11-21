@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server'
 import { createClient } from '@/lib/supabase/server'
+import { getVerifiedUserId } from '@/lib/auth/verified-user'
 import { getMediaUrl, downloadMedia } from '@/lib/whatsapp/meta-api'
 import { decrypt } from '@/lib/whatsapp/encryption'
 import { checkRateLimit, rateLimitResponse, RATE_LIMITS } from '@/lib/rate-limit'
@@ -24,19 +25,16 @@ export async function GET(
 
     const supabase = await createClient()
 
-    const {
-      data: { user },
-      error: authError,
-    } = await supabase.auth.getUser()
+    const userId = await getVerifiedUserId(supabase)
 
-    if (authError || !user) {
+    if (!userId) {
       return NextResponse.json(
         { error: t('common.unauthorized') },
         { status: 401 }
       )
     }
 
-    const limit = checkRateLimit(`whatsapp-media:${user.id}`, RATE_LIMITS.whatsappMedia)
+    const limit = checkRateLimit(`whatsapp-media:${userId}`, RATE_LIMITS.whatsappMedia)
     if (!limit.success) return rateLimitResponse(limit)
 
     // Resolve the caller's account_id — whatsapp_config is one-per-
@@ -46,7 +44,7 @@ export async function GET(
     const { data: profile } = await supabase
       .from('profiles')
       .select('account_id')
-      .eq('user_id', user.id)
+      .eq('user_id', userId)
       .maybeSingle()
     const accountId = profile?.account_id as string | undefined
     if (!accountId) {

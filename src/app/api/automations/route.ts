@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server'
 import { createClient } from '@/lib/supabase/server'
+import { getVerifiedUserId } from '@/lib/auth/verified-user'
 import { requireRole, toErrorResponse } from '@/lib/auth/account'
 import { supabaseAdmin } from '@/lib/automations/admin-client'
 import { getTemplate } from '@/lib/automations/templates'
@@ -14,9 +15,10 @@ const t = getT('Api')
 
 export async function GET() {
   const supabase = await createClient()
-  const {
-    data: { user },
-  } = await supabase.auth.getUser()
+  // Verified locally from the JWT (no /auth/v1/user round trip) — see
+  // src/lib/auth/verified-user.ts.
+  const verifiedId = await getVerifiedUserId(supabase)
+  const user = verifiedId ? { id: verifiedId } : null
   if (!user) return NextResponse.json({ error: t('common.unauthorized') }, { status: 401 })
 
   const { data, error } = await supabase
@@ -38,9 +40,10 @@ export async function POST(request: Request) {
   }
 
   const supabase = await createClient()
-  const {
-    data: { user },
-  } = await supabase.auth.getUser()
+  // Verified locally from the JWT (no /auth/v1/user round trip) — see
+  // src/lib/auth/verified-user.ts.
+  const verifiedId = await getVerifiedUserId(supabase)
+  const user = verifiedId ? { id: verifiedId } : null
   if (!user) return NextResponse.json({ error: t('common.unauthorized') }, { status: 401 })
 
   // Resolve the caller's account_id — `automations.account_id` is NOT

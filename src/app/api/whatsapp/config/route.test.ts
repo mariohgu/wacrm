@@ -67,6 +67,11 @@ function makeSupabaseMock() {
           ? { data: { user: { id: 'user-1' } }, error: null }
           : { data: { user: null }, error: { message: 'no session' } },
       ),
+      getClaims: vi.fn(async () =>
+        signedIn
+          ? { data: { claims: { sub: 'user-1' } }, error: null }
+          : { data: null, error: { message: 'no session' } },
+      ),
     },
     from: vi.fn((table: string) => builder(table)),
   }

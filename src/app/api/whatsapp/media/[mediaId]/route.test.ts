@@ -22,6 +22,10 @@ vi.mock('@/lib/supabase/server', () => ({
   createClient: async () => ({
     auth: {
       getUser: async () => ({ data: { user: h.user }, error: null }),
+      getClaims: async () => ({
+        data: h.user ? { claims: { sub: h.user.id } } : null,
+        error: null,
+      }),
     },
     from(table: string) {
       const chain = {

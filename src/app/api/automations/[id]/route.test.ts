@@ -56,6 +56,10 @@ vi.mock('@/lib/supabase/server', () => ({
         data: { user: { id: h.state.callerUserId } },
         error: null,
       }),
+      getClaims: async () => ({
+        data: { claims: { sub: h.state.callerUserId } },
+        error: null,
+      }),
     },
   }),
 }))

@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server'
 import { createClient } from '@/lib/supabase/server'
+import { getVerifiedUserId } from '@/lib/auth/verified-user'
 import { requireRole, toErrorResponse } from '@/lib/auth/account'
 import { supabaseAdmin } from '@/lib/flows/admin-client'
 import { validateFlowForActivation } from '@/lib/flows/validate'
@@ -31,9 +32,10 @@ async function requireOwnership(
   | { ok: false; status: number; body: { error: string } }
 > {
   const supabase = await createClient()
-  const {
-    data: { user },
-  } = await supabase.auth.getUser()
+  // Verified locally from the JWT (no /auth/v1/user round trip) — see
+  // src/lib/auth/verified-user.ts.
+  const verifiedId = await getVerifiedUserId(supabase)
+  const user = verifiedId ? { id: verifiedId } : null
   if (!user) {
     return { ok: false, status: 401, body: { error: t('common.unauthorized') } }
   }

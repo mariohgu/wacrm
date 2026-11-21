@@ -32,8 +32,9 @@ desplegar.
 
 1. **Copia de seguridad.** Supabase → Database → Backups (o
    `pg_dump`). La Fase B fusiona y modifica contactos y no se deshace.
-2. **Vercel → Settings → General → Node.js Version: 22.x.** El proyecto
-   ahora exige Node ≥ 22.12.
+2. **Node 22 en Hostinger.** El proyecto ahora exige Node ≥ 22.12. En
+   hPanel → tu web → **Node.js** (o *Websites → Advanced → Node.js*),
+   elige la versión 22.x para la app antes de desplegar.
 3. Elige un momento de poco movimiento (la Fase A tarda unos minutos).
 4. *Muy recomendable:* ensayar la Fase A en un proyecto Supabase
    gratuito restaurando la copia del paso 1. Si no, al menos prueba cada
@@ -105,19 +106,20 @@ reaccionar a la vez al mismo mensaje.
 
 ## 3. Desplegar el código
 
-1. Sube la rama: `git push -u origin integracion-upstream`. Vercel crea
-   un *preview*; ábrelo, entra y da una vuelta (bandeja, contactos,
-   ajustes). Los webhooks de WhatsApp siguen llegando a producción, así
-   que ahí no verás mensajes nuevos entrar.
-2. Si todo se ve bien, pasa la rama a `main` y súbela:
+La app corre en **Hostinger** (un único servidor Node), no en Vercel:
+no hay *previews*. La prueba previa es local (`npm run build` +
+`npm start` contra el mismo Supabase).
 
-   ```
-   git switch main
-   git merge --ff-only integracion-upstream
-   git push origin main
-   ```
+1. Anota el commit que hay hoy en producción, para poder volver a él
+   (en esta actualización es `7229eca`).
+2. Sube `main` a GitHub: `git push origin main`.
+3. Despliega en Hostinger como lo haces siempre (despliegue desde
+   GitHub o subiendo el código), asegurándote de que corre
+   `npm ci` y `npm run build` con Node 22, y reinicia la app.
+   Las variables de entorno no cambian (la única nueva,
+   `AI_PROVIDER_ALLOWED_PRIVATE_HOSTS`, es opcional).
 
-3. En Supabase → Authentication → URL Configuration → **Redirect URLs**
+4. En Supabase → Authentication → URL Configuration → **Redirect URLs**
    añade `https://TU-DOMINIO/auth/callback` (los correos de confirmación
    y de recuperar contraseña ahora pasan por ahí; ver
    `docs/auth-emails.md`).
@@ -125,9 +127,8 @@ reaccionar a la vez al mismo mensaje.
 ## 4. Observación (24–48 h)
 
 Recorre la lista de comprobación de más abajo. Durante esta ventana, si
-algo va mal, **Vercel → Deployments → Instant Rollback** al despliegue
-anterior es seguro (el código antiguo funciona con el esquema de la
-Fase A). Única salvedad: un cliente con número oculto que escriba **por
+algo va mal, volver a desplegar el commit anterior (paso 3.1) es
+seguro: el código antiguo funciona con el esquema de la Fase A. Única salvedad: un cliente con número oculto que escriba **por
 primera vez** durante la ventana puede quedar duplicado tras el
 rollback; se arregla con "Fusionar con otro contacto".
 
