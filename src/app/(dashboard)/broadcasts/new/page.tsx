@@ -50,7 +50,7 @@ export default function NewBroadcastPage() {
     if (!template) return;
 
     try {
-      const broadcastId = await createAndSendBroadcast({
+      const { broadcastId, interruption } = await createAndSendBroadcast({
         name,
         template,
         audience: {
@@ -63,11 +63,13 @@ export default function NewBroadcastPage() {
         variables,
         headerMediaUrl,
       });
+      if (interruption === 'lease_lost') toast.warning(t('toastSendTakenOver'));
+      if (interruption === 'lease_error') toast.error(t('toastSendInterrupted'));
       router.push(`/broadcasts/${broadcastId}`);
     } catch (err) {
       // Previously swallowed with console.error — the wizard would
       // just no-op, leaving the user confused. Surface the reason.
-      const message = err instanceof Error ? err.message : 'Broadcast failed';
+      const message = err instanceof Error ? err.message : t('broadcastFailed');
       console.error('Broadcast failed:', err);
       toast.error(message);
     }

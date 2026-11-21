@@ -79,13 +79,19 @@ export function classifyInbound(input: ClassifyInput): InboundClassification {
         case 'automation_active':
           // A message-level automation owns auto-responses on this account.
           return { kind: 'bot_replied' }
+        case 'superseded':
+          // The customer wrote again before the reply went out; the newer
+          // message carries its own attempt (and its own push). Keep
+          // this one quiet — the badge still counts the thread.
+          return { kind: 'bot_replied' }
         case 'cap_reached':
         case 'cap_race':
           return { kind: 'needs_attention', reasonKey: 'reasonCapReached' }
         case 'account_rate_limited':
           return { kind: 'needs_attention', reasonKey: 'reasonRateLimited' }
         default:
-          // human_assigned, paused, no_context, conversation_missing, and
+          // human_assigned, paused, taken_over, no_context,
+          // conversation_missing, and
           // any reason added later: the bot stood aside on purpose, so a
           // human is expected to answer.
           return { kind: 'new_message' }

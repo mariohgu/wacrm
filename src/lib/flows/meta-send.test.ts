@@ -42,6 +42,9 @@ function fakeDb(contact: FakeContact | null, captured: CapturedWrites): Supabase
         eq: () => builder,
         maybeSingle: async () => {
           if (table === 'contacts') return { data: contact, error: null }
+          // assertConversationInAccount (GHSA-m4fx-g6pr-hrw8): the
+          // conversation must belong to the account before any send.
+          if (table === 'conversations') return { data: { id: 'cv-1' }, error: null }
           return { data: null, error: null }
         },
         single: async () => {
@@ -76,9 +79,8 @@ describe('engineSendText', () => {
 
     expect(result.whatsapp_message_id).toBe('wamid.text')
     expect(
-      (sendTextMessage.mock.calls[0] as unknown as [{ recipientTarget: unknown }])[0]
-        .recipientTarget
-    ).toEqual({ type: 'phone', value: '15551234567' })
+      (sendTextMessage.mock.calls[0] as unknown as [{ to: unknown }])[0].to
+    ).toBe('15551234567')
     expect(sendTextMessage).toHaveBeenCalledTimes(1)
   })
 
@@ -94,22 +96,50 @@ describe('engineSendText', () => {
 
     expect(result.whatsapp_message_id).toBe('wamid.text')
     expect(sendTextMessage).toHaveBeenCalledTimes(1)
+    // The BSUID is handed to meta-api as `to`; `recipientFields` there
+    // turns a BSUID-shaped value into Meta's `recipient` field.
     expect(
-      (sendTextMessage.mock.calls[0] as unknown as [{ recipientTarget: unknown }])[0]
-        .recipientTarget
-    ).toEqual({ type: 'user_id', value: 'PE.1128521366369305' })
+      (sendTextMessage.mock.calls[0] as unknown as [{ to: unknown }])[0].to
+    ).toBe('PE.1128521366369305')
     // Nothing to auto-correct on a BSUID send.
     expect(captured.contactUpdate).toBeUndefined()
   })
 
-  it('throws before calling Meta when phone is a BSUID placeholder with no wa_user_id', async () => {
+  it('still answers a legacy row whose BSUID was only ever parked in phone', async () => {
     sendTextMessage.mockClear()
     const captured: CapturedWrites = {}
     currentDb = fakeDb({ id: 'ct-3', phone: 'PE.1128521366369305' }, captured)
 
+    await engineSendText({ ...BASE_ARGS, contactId: 'ct-3' })
+
+    expect(sendTextMessage).toHaveBeenCalledTimes(1)
+    expect(
+      (sendTextMessage.mock.calls[0] as unknown as [{ to: unknown }])[0].to
+    ).toBe('PE.1128521366369305')
+    expect(captured.contactUpdate).toBeUndefined()
+  })
+
+  it('never sends to the digits of a parked BSUID as if they were a phone', async () => {
+    sendTextMessage.mockClear()
+    const captured: CapturedWrites = {}
+    // "US.987654321" sanitizes to the E.164-plausible "987654321".
+    currentDb = fakeDb({ id: 'ct-4', phone: 'US.987654321' }, captured)
+
+    await engineSendText({ ...BASE_ARGS, contactId: 'ct-4' })
+
+    expect(
+      (sendTextMessage.mock.calls[0] as unknown as [{ to: unknown }])[0].to
+    ).toBe('US.987654321')
+  })
+
+  it('throws before calling Meta when the contact has neither a phone nor a BSUID', async () => {
+    sendTextMessage.mockClear()
+    const captured: CapturedWrites = {}
+    currentDb = fakeDb({ id: 'ct-5', phone: '' }, captured)
+
     await expect(
-      engineSendText({ ...BASE_ARGS, contactId: 'ct-3' })
-    ).rejects.toThrow(/contact phone invalid/)
+      engineSendText({ ...BASE_ARGS, contactId: 'ct-5' })
+    ).rejects.toThrow()
     expect(sendTextMessage).not.toHaveBeenCalled()
   })
 })

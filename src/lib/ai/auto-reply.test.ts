@@ -9,15 +9,22 @@ const h = vi.hoisted(() => ({
   retrieveKnowledge: vi.fn(),
   generateReply: vi.fn(),
   engineSendText: vi.fn(),
+  loadAccountMetaCredentials: vi.fn(),
+  sendTypingIndicator: vi.fn(),
   state: {
     conv: null as Record<string, unknown> | null,
+    // When set, every conversation read AFTER the first returns this —
+    // simulates a human taking the thread over mid-generation.
+    convAfterFirstRead: null as Record<string, unknown> | null,
     autoResponders: [] as { id: string }[],
     claim: true as boolean,
     updatePayload: null as Record<string, unknown> | null,
+    updates: [] as { payload: Record<string, unknown>; isNull: string[] }[],
     rpcCalls: [] as { name: string; args: unknown }[],
     // Rows written to `ai_reply_events` — one per dispatch that got past
     // the account-level gate.
     events: [] as Record<string, unknown>[],
+    latestInbound: [] as { message_id: string }[],
   },
 }))
 
@@ -31,7 +38,13 @@ vi.mock('./context', () => ({
 }))
 vi.mock('./knowledge', () => ({ retrieveKnowledge: h.retrieveKnowledge }))
 vi.mock('./generate', () => ({ generateReply: h.generateReply }))
-vi.mock('@/lib/flows/meta-send', () => ({ engineSendText: h.engineSendText }))
+vi.mock('@/lib/flows/meta-send', () => ({
+  engineSendText: h.engineSendText,
+  loadAccountMetaCredentials: h.loadAccountMetaCredentials,
+}))
+vi.mock('@/lib/whatsapp/meta-api', () => ({
+  sendTypingIndicator: h.sendTypingIndicator,
+}))
 vi.mock('./admin-client', () => ({
   supabaseAdmin: () => ({
     from: (table: string) => {
@@ -54,17 +67,42 @@ vi.mock('./admin-client', () => ({
           },
         }
       }
+      if (table === 'messages') {
+        const chain = {
+          select: () => chain,
+          eq: () => chain,
+          order: () => chain,
+          limit: () =>
+            Promise.resolve({ data: h.state.latestInbound, error: null }),
+        }
+        return chain
+      }
       // conversations
       return {
         select: () => ({
           eq: () => ({
-            maybeSingle: () =>
-              Promise.resolve({ data: h.state.conv, error: null }),
+            maybeSingle: () => {
+              const data = h.state.conv
+              if (h.state.convAfterFirstRead) {
+                h.state.conv = h.state.convAfterFirstRead
+                h.state.convAfterFirstRead = null
+              }
+              return Promise.resolve({ data, error: null })
+            },
           }),
         }),
         update: (payload: Record<string, unknown>) => {
-          h.state.updatePayload = payload
-          return { eq: () => Promise.resolve({ error: null }) }
+          h.state.updatePayload = { ...h.state.updatePayload, ...payload }
+          const record = { payload, isNull: [] as string[] }
+          h.state.updates.push(record)
+          const result = Promise.resolve({ error: null })
+          const filter = Object.assign(result, {
+            is: (column: string) => {
+              record.isNull.push(column)
+              return result
+            },
+          })
+          return { eq: () => filter }
         },
       }
     },
@@ -82,12 +120,14 @@ const ARGS = {
   conversationId: 'conv-1',
   contactId: 'contact-1',
   configOwnerUserId: 'user-1',
+  inboundWamid: 'wamid.inbound-1',
 }
 
 function aiConfig(overrides: Partial<AiConfig> = {}): AiConfig {
   return {
     provider: 'openai',
     model: 'gpt-test',
+    baseUrl: null,
     apiKey: 'sk-test',
     systemPrompt: null,
     isActive: true,
@@ -105,11 +145,14 @@ beforeEach(() => {
     ai_autoreply_disabled: false,
     ai_reply_count: 0,
   }
+  h.state.convAfterFirstRead = null
   h.state.autoResponders = []
   h.state.claim = true
   h.state.updatePayload = null
+  h.state.updates = []
   h.state.rpcCalls = []
   h.state.events = []
+  h.state.latestInbound = [{ message_id: 'wamid.inbound-1' }]
   h.loadAiConfig.mockResolvedValue(aiConfig())
   h.buildConversationContext.mockResolvedValue([{ role: 'user', content: 'hi' }])
   h.buildCustomerContext.mockResolvedValue({
@@ -120,6 +163,11 @@ beforeEach(() => {
   h.retrieveKnowledge.mockResolvedValue([])
   h.generateReply.mockResolvedValue({ text: 'Hello!', handoff: false })
   h.engineSendText.mockResolvedValue({ whatsapp_message_id: 'm1' })
+  h.loadAccountMetaCredentials.mockResolvedValue({
+    phoneNumberId: 'pn-1',
+    accessToken: 'tok',
+  })
+  h.sendTypingIndicator.mockResolvedValue(undefined)
 })
 
 describe('dispatchInboundToAiReply — eligibility gates', () => {
@@ -162,6 +210,7 @@ describe('dispatchInboundToAiReply — eligibility gates', () => {
     await dispatchInboundToAiReply(ARGS)
     expect(h.generateReply).not.toHaveBeenCalled()
     expect(h.engineSendText).not.toHaveBeenCalled()
+    expect(h.sendTypingIndicator).not.toHaveBeenCalled()
   })
 
   it('does not send when the atomic slot claim loses the race', async () => {
@@ -170,6 +219,27 @@ describe('dispatchInboundToAiReply — eligibility gates', () => {
     // It still attempts the claim, but the send is skipped.
     expect(h.state.rpcCalls).toHaveLength(1)
     expect(h.engineSendText).not.toHaveBeenCalled()
+  })
+
+  it('skips when the slot claim is refused after a human takeover', async () => {
+    h.state.claim = false
+    await dispatchInboundToAiReply(ARGS)
+    expect(h.generateReply).toHaveBeenCalledTimes(1)
+    expect(h.state.rpcCalls).toHaveLength(1)
+    expect(h.engineSendText).not.toHaveBeenCalled()
+  })
+
+  it('leaves the reply to the newer run when another inbound arrived', async () => {
+    h.state.latestInbound = [{ message_id: 'wamid.inbound-2' }]
+    await dispatchInboundToAiReply(ARGS)
+    expect(h.state.rpcCalls).toHaveLength(0)
+    expect(h.engineSendText).not.toHaveBeenCalled()
+  })
+
+  it('replies when the triggering inbound is still the latest', async () => {
+    h.state.latestInbound = [{ message_id: 'wamid.inbound-1' }]
+    await dispatchInboundToAiReply(ARGS)
+    expect(h.engineSendText).toHaveBeenCalledTimes(1)
   })
 
   it('skips when AI is off / not configured', async () => {
@@ -193,6 +263,7 @@ describe('dispatchInboundToAiReply — eligibility gates', () => {
     }
     await dispatchInboundToAiReply(ARGS)
     expect(h.engineSendText).not.toHaveBeenCalled()
+    expect(h.sendTypingIndicator).not.toHaveBeenCalled()
   })
 
   it('skips when auto-reply was disabled on this conversation', async () => {
@@ -220,6 +291,71 @@ describe('dispatchInboundToAiReply — eligibility gates', () => {
     await dispatchInboundToAiReply(ARGS)
     expect(h.generateReply).not.toHaveBeenCalled()
     expect(h.engineSendText).not.toHaveBeenCalled()
+    expect(h.sendTypingIndicator).not.toHaveBeenCalled()
+  })
+})
+
+describe('dispatchInboundToAiReply — typing indicator (#527)', () => {
+  it('shows "typing…" on the inbound wamid before calling the LLM', async () => {
+    await dispatchInboundToAiReply(ARGS)
+    expect(h.loadAccountMetaCredentials).toHaveBeenCalledWith(
+      expect.anything(),
+      'acct-1',
+    )
+    expect(h.sendTypingIndicator).toHaveBeenCalledTimes(1)
+    expect(h.sendTypingIndicator).toHaveBeenCalledWith({
+      phoneNumberId: 'pn-1',
+      accessToken: 'tok',
+      messageId: 'wamid.inbound-1',
+    })
+    // Ordering: the indicator goes out while the customer waits on the
+    // model, not after the reply is already generated.
+    const typingOrder = h.sendTypingIndicator.mock.invocationCallOrder[0]
+    const llmOrder = h.generateReply.mock.invocationCallOrder[0]
+    expect(typingOrder).toBeLessThan(llmOrder)
+    expect(h.engineSendText).toHaveBeenCalledTimes(1)
+  })
+
+  it('still sends the reply when the indicator request fails', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    h.sendTypingIndicator.mockRejectedValue(new Error('Meta API error: 400'))
+    await dispatchInboundToAiReply(ARGS)
+    expect(h.generateReply).toHaveBeenCalledTimes(1)
+    expect(h.engineSendText).toHaveBeenCalledWith(
+      expect.objectContaining({ conversationId: 'conv-1', text: 'Hello!' }),
+    )
+    expect(warn).toHaveBeenCalledWith(
+      expect.stringContaining('typing indicator failed'),
+      expect.any(Error),
+    )
+    warn.mockRestore()
+  })
+
+  it('still sends the reply when the WhatsApp credentials cannot be loaded', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    h.loadAccountMetaCredentials.mockRejectedValue(
+      new Error('WhatsApp not configured for this account'),
+    )
+    await dispatchInboundToAiReply(ARGS)
+    expect(h.sendTypingIndicator).not.toHaveBeenCalled()
+    expect(h.engineSendText).toHaveBeenCalledTimes(1)
+    warn.mockRestore()
+  })
+
+  it('skips the indicator when no inbound wamid is supplied', async () => {
+    const { inboundWamid: _omit, ...legacyArgs } = ARGS
+    void _omit
+    await dispatchInboundToAiReply(legacyArgs)
+    expect(h.sendTypingIndicator).not.toHaveBeenCalled()
+    expect(h.loadAccountMetaCredentials).not.toHaveBeenCalled()
+    expect(h.engineSendText).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not fire when a gate short-circuits before the LLM', async () => {
+    h.loadAiConfig.mockResolvedValue(aiConfig({ autoReplyEnabled: false }))
+    await dispatchInboundToAiReply(ARGS)
+    expect(h.sendTypingIndicator).not.toHaveBeenCalled()
+    expect(h.loadAccountMetaCredentials).not.toHaveBeenCalled()
   })
 })
 
@@ -245,6 +381,18 @@ describe('dispatchInboundToAiReply — handoff', () => {
       ai_autoreply_disabled: true,
       assigned_agent_id: 'agent-7',
     })
+  })
+
+  it('assigns the handoff agent only while the thread is still unassigned', async () => {
+    h.loadAiConfig.mockResolvedValue(aiConfig({ handoffAgentId: 'agent-7' }))
+    h.generateReply.mockResolvedValue({ text: '', handoff: true })
+    await dispatchInboundToAiReply(ARGS)
+    const pause = h.state.updates.find((u) => 'ai_autoreply_disabled' in u.payload)
+    const assign = h.state.updates.find((u) => 'assigned_agent_id' in u.payload)
+    expect(pause?.payload).not.toHaveProperty('assigned_agent_id')
+    expect(pause?.isNull).toEqual([])
+    expect(assign?.payload).toEqual({ assigned_agent_id: 'agent-7' })
+    expect(assign?.isNull).toEqual(['assigned_agent_id'])
   })
 
   it('sends a paired farewell message before going quiet, claiming a slot for it', async () => {
@@ -303,7 +451,7 @@ describe('dispatchInboundToAiReply — ai_reply_events audit trail', () => {
   }
 
   it('records a replied/sent event carrying the inbound message id', async () => {
-    await dispatchInboundToAiReply({ ...ARGS, inboundMessageId: 'msg-42' })
+    await dispatchInboundToAiReply({ ...ARGS, inboundMessageRowId: 'msg-42' })
     expect(event()).toMatchObject({
       account_id: 'acct-1',
       conversation_id: 'conv-1',
@@ -380,6 +528,50 @@ describe('dispatchInboundToAiReply — ai_reply_events audit trail', () => {
     h.state.claim = false
     await dispatchInboundToAiReply(ARGS)
     expect(event()).toMatchObject({ outcome: 'skipped', reason: 'cap_race' })
+  })
+
+  it('records taken_over, not cap_race, when a human took the thread mid-generation', async () => {
+    // Migration 053: the claim also refuses once the conversation is
+    // assigned or paused. The early read saw it free; the re-read after
+    // the refused claim sees the agent.
+    h.state.claim = false
+    h.state.convAfterFirstRead = {
+      assigned_agent_id: 'agent-9',
+      ai_autoreply_disabled: false,
+      ai_reply_count: 0,
+    }
+    await expect(dispatchInboundToAiReply(ARGS)).resolves.toMatchObject({
+      outcome: 'skipped',
+      reason: 'taken_over',
+    })
+    expect(h.engineSendText).not.toHaveBeenCalled()
+    expect(event()).toMatchObject({ outcome: 'skipped', reason: 'taken_over' })
+  })
+
+  it('records superseded and sends nothing when the customer wrote again', async () => {
+    h.state.latestInbound = [{ message_id: 'wamid.inbound-2' }]
+    await dispatchInboundToAiReply(ARGS)
+    expect(h.engineSendText).not.toHaveBeenCalled()
+    // No slot is consumed for a reply that never goes out.
+    expect(h.state.rpcCalls).toEqual([])
+    expect(event()).toMatchObject({ outcome: 'skipped', reason: 'superseded' })
+  })
+
+  it('keeps the row id and the wamid apart', async () => {
+    // The UUID goes to the audit row; the wamid drives the typing
+    // indicator and the superseded check. Swapping them would make every
+    // attempt look superseded.
+    await dispatchInboundToAiReply({
+      ...ARGS,
+      inboundMessageRowId: '11111111-1111-4111-8111-111111111111',
+    })
+    expect(h.sendTypingIndicator).toHaveBeenCalledWith(
+      expect.objectContaining({ messageId: 'wamid.inbound-1' }),
+    )
+    expect(event()).toMatchObject({
+      message_id: '11111111-1111-4111-8111-111111111111',
+      outcome: 'replied',
+    })
   })
 
   it('records a provider failure with the AiError code and message', async () => {

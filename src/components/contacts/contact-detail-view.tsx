@@ -51,8 +51,10 @@ import {
   Merge,
   Search,
 } from 'lucide-react';
-import { useTranslations } from 'next-intl';
-import { looksLikePhoneNumber } from '@/lib/whatsapp/phone-utils';
+import { useLocale, useTranslations } from 'next-intl';
+import { planCustomValueWrites } from '@/lib/contacts/custom-value-writes';
+import { contactHandle, isBusinessScopedUserId } from '@/lib/whatsapp/wa-identity';
+import { parseInternationalPhone } from '@/lib/whatsapp/phone-utils';
 
 /**
  * Search-and-confirm dialog for collapsing a duplicate contact into
@@ -240,6 +242,7 @@ export function ContactDetailView({
   onUpdated,
 }: ContactDetailViewProps) {
   const t = useTranslations('Contacts.detailView');
+  const locale = useLocale();
   const supabase = createClient();
   const { accountId, defaultCurrency } = useAuth();
 
@@ -383,14 +386,28 @@ export function ContactDetailView({
 
   async function copyPhone() {
     if (!contact) return;
-    await navigator.clipboard.writeText(contact.phone);
+    await navigator.clipboard.writeText(contactHandle(contact));
     setCopiedPhone(true);
     setTimeout(() => setCopiedPhone(false), 2000);
   }
 
   async function saveDetails() {
-    if (!contactId || !editPhone.trim()) {
+    // A WhatsApp-usernames contact has no phone number at all (`phone`
+    // is '') — it is identified by its BSUID / @username instead, and
+    // must stay editable (name, email, linking a username).
+    const hasWaIdentity = !!contact?.wa_user_id || !!editWaUsername.trim();
+    if (!contactId || (!editPhone.trim() && !hasWaIdentity)) {
       toast.error(t('toastPhoneRequired'));
+      return;
+    }
+
+    // Same rule as the create form: a changed number must start with `+`
+    // and a country code (issue #586). Unchanged numbers — including the
+    // digits-only form the inbound webhook stores — are left alone so a
+    // name/email edit is never blocked by the phone field.
+    const phoneChanged = editPhone.trim() !== (contact?.phone ?? '');
+    if (phoneChanged && !parseInternationalPhone(editPhone)) {
+      toast.error(t('toastPhoneNeedsCountryCode'));
       return;
     }
 
@@ -488,24 +505,24 @@ export function ContactDetailView({
     setSavingCustom(true);
 
     try {
-      // Delete existing values and re-insert
-      await supabase
-        .from('contact_custom_values')
-        .delete()
-        .eq('contact_id', contactId);
+      const { upserts, clearedFieldIds } = planCustomValueWrites(
+        contactId,
+        customValues
+      );
 
-      const rows = Object.entries(customValues)
-        .filter(([, val]) => val.trim())
-        .map(([fieldId, val]) => ({
-          contact_id: contactId,
-          custom_field_id: fieldId,
-          value: val.trim(),
-        }));
-
-      if (rows.length > 0) {
+      if (upserts.length > 0) {
         const { error } = await supabase
           .from('contact_custom_values')
-          .insert(rows);
+          .upsert(upserts, { onConflict: 'contact_id,custom_field_id' });
+        if (error) throw error;
+      }
+
+      if (clearedFieldIds.length > 0) {
+        const { error } = await supabase
+          .from('contact_custom_values')
+          .delete()
+          .eq('contact_id', contactId)
+          .in('custom_field_id', clearedFieldIds);
         if (error) throw error;
       }
 
@@ -551,8 +568,8 @@ export function ContactDetailView({
 
       toast.success(t('toastTemplateSent', { name: template.name }));
     } catch (err) {
-      const reason = err instanceof Error ? err.message : 'network error';
-      toast.error(`Failed to send template: ${reason}`);
+      const reason = err instanceof Error ? err.message : t('networkError');
+      toast.error(t('toastTemplateFailed', { reason }));
     } finally {
       setSendingTemplate(false);
     }
@@ -597,7 +614,7 @@ export function ContactDetailView({
                     {t('contactDetailsDesc')}
                   </SheetDescription>
                   <div className="flex flex-wrap items-center gap-3 mt-1.5 text-xs text-muted-foreground">
-                    {looksLikePhoneNumber(contact.phone) ? (
+                    {contact.phone?.trim() && !isBusinessScopedUserId(contact.phone) ? (
                       <button
                         onClick={copyPhone}
                         className="flex items-center gap-1 hover:text-primary transition-colors cursor-pointer"
@@ -611,11 +628,11 @@ export function ContactDetailView({
                         )}
                       </button>
                     ) : (
-                      // Not a real phone number — a WhatsApp-usernames
-                      // customer whose hidden number is stored as a BSUID
-                      // placeholder. Show the readable @handle instead of
-                      // the opaque token (see CLAUDE.md's "WhatsApp
-                      // contact identity" section).
+                      // No real phone number — a WhatsApp-usernames
+                      // customer. `phone` is '' (or, on a row from before
+                      // the 2026-11 upstream merge, a parked BSUID). Show
+                      // the readable @handle, never the opaque token (see
+                      // CLAUDE.md's "WhatsApp contact identity" section).
                       <span
                         className="flex items-center gap-1"
                         title={t('waUsernameNoPhoneTooltip')}
@@ -859,7 +876,7 @@ export function ContactDetailView({
                           </button>
                         </div>
                         <p className="text-xs text-muted-foreground mt-1.5">
-                          {new Date(note.created_at).toLocaleDateString('en-US', {
+                          {new Date(note.created_at).toLocaleDateString(locale, {
                             month: 'short',
                             day: 'numeric',
                             year: 'numeric',

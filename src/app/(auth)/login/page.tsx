@@ -38,6 +38,15 @@ function LoginPageInner() {
   // page to accept rather than to /dashboard.
   const inviteToken = searchParams.get("invite");
   const t = useTranslations("LoginPage");
+  // Set by /auth/callback when an emailed link (confirmation, password
+  // reset) could not be turned into a session — see src/lib/auth/callback.ts.
+  const linkError = searchParams.get("error");
+  const linkErrorMessage =
+    linkError === "link_expired"
+      ? t("linkExpired")
+      : linkError === "link_invalid"
+        ? t("linkInvalid")
+        : null;
 
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -97,6 +106,11 @@ function LoginPageInner() {
         </CardHeader>
         <CardContent>
           <form onSubmit={handleLogin} className="flex flex-col gap-4">
+            {linkErrorMessage && !error && (
+              <div className="rounded-lg border border-amber-500/20 bg-amber-500/10 px-4 py-3 text-sm text-amber-300">
+                {linkErrorMessage}
+              </div>
+            )}
             {error && (
               <div className="rounded-lg border border-red-500/20 bg-red-500/10 px-4 py-3 text-sm text-red-400">
                 {error}
@@ -119,17 +133,9 @@ function LoginPageInner() {
             </div>
 
             <div className="flex flex-col gap-2">
-              <div className="flex items-center justify-between">
-                <Label htmlFor="password" className="text-muted-foreground">
-                  {t('passwordLabel')}
-                </Label>
-                <Link
-                  href="/forgot-password"
-                  className="text-sm text-primary hover:text-primary/80"
-                >
-                  {t('forgotPassword')}
-                </Link>
-              </div>
+              <Label htmlFor="password" className="text-muted-foreground">
+                {t('passwordLabel')}
+              </Label>
               <Input
                 id="password"
                 type="password"
@@ -139,6 +145,13 @@ function LoginPageInner() {
                 required
                 className="border-border bg-muted text-foreground placeholder:text-muted-foreground focus-visible:border-primary focus-visible:ring-primary/20"
               />
+              {/* Below the input so Tab goes email -> password -> link. */}
+              <Link
+                href="/forgot-password"
+                className="self-end text-sm text-primary hover:text-primary/80"
+              >
+                {t('forgotPassword')}
+              </Link>
             </div>
 
             <Button

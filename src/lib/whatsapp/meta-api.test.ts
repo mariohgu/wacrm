@@ -17,7 +17,7 @@ const neverFetch = () =>
 const BASE_ARGS = {
   phoneNumberId: "test-phone",
   accessToken: "test-token",
-  recipientTarget: { type: "phone", value: "1234567890" },
+  to: "1234567890",
   bodyText: "Body text",
 } as const;
 
@@ -155,7 +155,7 @@ describe("sendInteractiveButtons — validation", () => {
 
     await sendInteractiveButtons({
       ...BASE_ARGS,
-      recipientTarget: { type: "user_id", value: "PE.1128521366369305" },
+      to: "PE.1128521366369305",
       buttons: [{ id: "a", title: "A" }],
     });
 
@@ -307,7 +307,7 @@ describe("sendInteractiveList — validation", () => {
 
     await sendInteractiveList({
       ...BASE_ARGS,
-      recipientTarget: { type: "user_id", value: "PE.1128521366369305" },
+      to: "PE.1128521366369305",
       buttonLabel: "Open",
       sections: [{ rows: [{ id: "r1", title: "Row 1" }] }],
     });

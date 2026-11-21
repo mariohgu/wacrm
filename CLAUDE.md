@@ -9,16 +9,78 @@ fixes, correctness bugs, and small polish back.
 
 ## Stack
 
-- Next.js 16.2.12, React 19, TypeScript
+- Next.js 16.3.8, React 19, TypeScript, Node ≥ 22.12
 - Supabase (Postgres + Auth), SQL migrations in `supabase/migrations/`
-  (numbered, sequential, idempotent — see any file for the pattern)
+  (numbered, sequential, idempotent — see any file for the pattern;
+  upstream's are 001–060, the fork's own are 900–907)
 - Tailwind + shadcn/ui (`components.json`)
-- `next-intl` for i18n — `messages/en.json` + `messages/ko.json` + `messages/es.json`
+- `next-intl` for i18n — `messages/{en,ko,pt,es}.json`
 - Vitest for tests, ESLint + Prettier
 - `mcp-server/` — a separate npm package exposing the CRM over MCP
   (own `package.json`/deps, not installed at repo root — expect
   `tsc`/`next build` to report module-not-found errors under
   `mcp-server/` unless its own deps are installed; unrelated to app code)
+
+## Keeping in sync with upstream (read before any merge)
+
+This fork tracks `ArnasDon/wacrm`. Local branch `main-original` mirrors
+`upstream/main`; `main` is the fork. Since 2026-11-21 the two share
+history (a real `git merge`, not a rebase), so the next sync is
+`git merge main-original` on a branch cut from `main` and conflicts are
+limited to what changed on both sides since then.
+
+**Resolution rule: upstream's structure is the base, the fork's
+behaviour is grafted on top.** Where both sides solved the same problem
+(contact identity, the send path, the mobile composer, Spanish), take
+upstream's shape — fewer conflicts next time — and re-apply the fork's
+guarantees inside it. Every such graft is marked `FORK:` in a comment;
+`git grep -n "FORK"` lists them.
+
+Fork deltas that a merge can silently undo (git reports no conflict for
+most of these — check each one by hand):
+
+- **Migrations.** Fork migrations live in the **900 range**
+  (`900_openrouter_provider` … `907_redeem_invitation_fork_tables`) so
+  they never collide with an upstream number and always run after
+  upstream's on a fresh database. Three of them re-create an object
+  upstream may touch again:
+  - `900` re-creates both AI `provider` CHECK constraints — it must list
+    **every** provider, upstream's included, or it removes them.
+  - `901` re-creates `flow_nodes_node_type_check` — same rule for node
+    types.
+  - `907` is upstream's `redeem_invitation()` (from 047) plus the fork's
+    tables — re-derive it whenever upstream changes that function.
+    `src/lib/auth/redeem-invitation-migration.test.ts` fails when an
+    account-scoped table is missing from its data guard.
+  `supabase/ci/verify-schema.sql` asserts all of the above. Old names,
+  still used in the change-log entries below: `036_a`/"037" → 900,
+  `037_a`/"038" → 901, `039b`/"040_wa_username_identity" → 902 (+906),
+  `039c`/"040_transcription_key" → 903, `039d`/"040_ai_reply_events" →
+  904, `039e`/"040_push_subscriptions" → 905.
+- **A production database is upgraded by hand** (SQL Editor), in two
+  phases around the deploy — see `supabase/upgrade/2026-11/LEEME.md`
+  for the worked example and the reasoning (code-first cannot boot;
+  all-migrations-first loses messages).
+- **Flows.** A new node type must also be added to
+  `AUTO_ADVANCING_NODE_TYPES` (`src/lib/flows/types.ts`) when it does
+  not wait for the customer, and its `NODE_META` entry
+  (`src/components/flows/shared.tsx`) uses `slugSeed`, not
+  `label`/`blurb` (labels come from `Flows.builder.nodes.<type>.*`).
+- **i18n.** The four catalogues are rebuilt by rule, not merged by
+  hand — see "i18n / locales".
+- **Landing route.** Upstream hard-codes `/dashboard` as the
+  post-auth destination; the fork uses `DEFAULT_LANDING_PATH`. Grep new
+  auth code for `"/dashboard"`.
+- **Brand.** Upstream's new strings say "wacrm"; product mentions in
+  `messages/*.json` become `APP_NAME`'s value (identifiers such as
+  `wacrm_live_` and `X-Wacrm-Signature` never change).
+- **Notifications.** Upstream's tab-only browser notifications
+  (`BrowserNotificationsListener`, `BrowserNotificationsCard`) are kept
+  in the tree but **not mounted** — the fork's Web Push covers the same
+  event and both together notify twice.
+- **`next.config.ts` header rules** are order-sensitive (last match
+  wins): `/sw.js` and `/icons/*` must stay after upstream's catch-all
+  `private, no-store` rule.
 
 ## Feature modules (`src/app/(dashboard)/`)
 
@@ -39,12 +101,25 @@ example of this failure mode).
 
 `en.json` is the source of truth. `src/i18n/messages.test.ts` enforces parity
 for every locale listed in its `TRANSLATED_LOCALES` array (currently `['ko',
-'es']`): every `en.json` key must exist in each translated file, and each
-translated file must have no orphaned keys absent from `en.json`. Run
-`npx vitest run src/i18n/messages.test.ts` after touching any locale file —
-adding a new key to `en.json` without updating `ko.json`/`es.json` fails it
-immediately, which is much faster feedback than finding a raw key string in
-the UI later.
+'pt', 'es']`): every `en.json` key must exist in each translated file, each
+translated file must have no orphaned keys absent from `en.json`, and ICU
+placeholders must match. Run `npx vitest run src/i18n` after touching any
+locale file — adding a new key to `en.json` without updating the other three
+fails it immediately, which is much faster feedback than finding a raw key
+string in the UI later. `pt.json` is upstream's; fork-only keys live there as
+English copies. `src/i18n/es-context.test.ts` (upstream) pins exact Spanish
+strings in `Presence`, `Handoff`, `Notifications` and parts of
+`Settings.appearance` — upstream's wording must win there.
+
+**Merging catalogues.** Never hand-resolve `messages/*.json` conflicts (the
+2026-11 merge had 116 hunks in `es.json` alone). Rebuild each file from the
+three git versions instead: start from upstream's catalogue, add the keys the
+fork added since the merge base, re-apply the values the fork changed on
+purpose (branding), and for `es` keep the fork's wording wherever the fork
+already had the key — unless upstream changed that key's English, or
+`es-context.test.ts` pins it. Client bundles import the active locale through
+the `@app-messages` alias (`next.config.ts`; `tsconfig` and `vitest.config.ts`
+map it to `en.json`, which is therefore also the type source for `t()` keys).
 
 ## AI reply assistant (`src/lib/ai/`)
 
@@ -78,9 +153,16 @@ dependency — every provider is a plain `fetch` adapter under
   `auto-reply.ts` (the bot) and `api/ai/draft/route.ts` (the inbox
   "draft" button) — NOT into `api/ai/playground/route.ts`, which is a
   stateless test chat with no real conversation/contact to look up.
-- `providers/{openai,anthropic,openrouter}.ts` — one adapter per
-  provider; `providers/shared.ts` has the cross-provider helpers
-  (usage normalization, HTTP/network error mapping, turn merging)
+- `providers/{openai,anthropic,openrouter,openai-compatible}.ts` — one
+  adapter per provider; `providers/shared.ts` has the cross-provider
+  helpers (usage normalization, HTTP/network error mapping, turn
+  merging). `openai_compatible` is upstream's (2026-11 merge): any
+  OpenAI-wire endpoint at a configurable `ai_configs.base_url`, https
+  only unless the host is in `AI_PROVIDER_ALLOWED_PRIVATE_HOSTS`, behind
+  the SSRF guard. `openrouter` is the fork's and stays a provider of its
+  own — production rows use it and `resolveAuxiliaryEndpoint` keys on
+  it; `openai_compatible` gets no auxiliary endpoint without a fallback
+  key (same as Anthropic).
 - `embeddings.ts` — optional semantic KB search (`embedTexts`, fixed at
   `text-embedding-3-small`/1536-dim to match the `vector(1536)` column
   in migration 030 — see the auxiliary-endpoint section below for how
@@ -93,8 +175,10 @@ dependency — every provider is a plain `fetch` adapter under
   ("Test key" button), `src/app/api/ai/draft/route.ts` (inbox draft)
 - DB: `ai_configs` (per-account config + encrypted key,
   `supabase/migrations/029_ai_reply.sql`), `ai_usage_log` (token spend,
-  `033_ai_reply_polish.sql`) — both CHECK-constrain `provider`, so a new
-  provider needs a migration widening both constraints, not just app code
+  `033_ai_reply_polish.sql`) — both CHECK-constrain `provider` (four
+  values today: upstream's 046 + the fork's 900, which must always list
+  every provider), so a new provider needs a migration widening both
+  constraints, not just app code
 
 ### Auxiliary OpenAI-only capabilities (embeddings, transcription)
 
@@ -200,6 +284,26 @@ the handoff bookkeeping (`ai_autoreply_disabled`, `ai_handoff_summary`)
 below it. Before this, the handoff branch discarded any model text
 outright and the customer got silence.
 
+**Upstream behaviour folded into `runAutoReply` (2026-11 merge).** The
+fork's split (`runAutoReply` → `AutoReplyAttempt`, logged and returned
+by `dispatchInboundToAiReply`) is the frame; inside it now run
+upstream's typing indicator (`sendTypingIndicator`, best-effort, after
+every gate has passed), `hasNewerInbound` (the customer wrote again
+while the reply was generated → `skipped/superseded`, no slot
+consumed), and the two-step handoff whose assignee UPDATE is guarded by
+`assigned_agent_id IS NULL`. Migration 053 makes `claim_ai_reply_slot`
+also refuse once the conversation is paused or assigned, so a refused
+claim is re-read to tell `taken_over` (a person took the thread
+mid-generation) from `cap_race`.
+
+`DispatchArgs` carries **two different ids for the same customer
+message and they must never be conflated** — both are strings, so `tsc`
+cannot catch a swap: `inboundMessageRowId` is the internal
+`messages.id` UUID (the `ai_reply_events.message_id` foreign key);
+`inboundWamid` is Meta's message id (typing indicator + superseded
+check). A UUID passed as the wamid makes every attempt look superseded
+— the bot silently never replies.
+
 ### Auto-reply diagnostics (`ai_reply_events`)
 
 `dispatchInboundToAiReply` (`auto-reply.ts`) has ~a dozen exit paths,
@@ -208,7 +312,7 @@ banner kept saying "AI is replying automatically" while the bot had
 actually stopped. Now the dispatcher is split in two: `runAutoReply`
 does the work and returns an `AutoReplyAttempt` (`{outcome, reason,
 detail}`), and `dispatchInboundToAiReply` writes that to
-`ai_reply_events` (migration 040) via `reply-events.ts`'s
+`ai_reply_events` (fork migration 904) via `reply-events.ts`'s
 `logAiReplyEvent` (never throws — audit failure must not affect the
 reply). One row per inbound message the bot was asked to handle, **only
 once the account-level gate passes** (no config / `auto_reply_enabled`
@@ -350,120 +454,114 @@ only ever POSTs a pending booking to it.
   per-locale template variants), matching the existing
   `welcome_menu`/`faq_bot`/`lead_capture` convention.
 
-## WhatsApp contact identity (phone vs. BSUID)
+## WhatsApp contact identity (phone, @username, BSUID)
 
-Meta's "WhatsApp usernames" rollout (live since 2026-03-31, mandatory by
-June 2026) lets a customer hide their phone number from a business.
-**Confirmed against a real payload from an affected account** (2026-08-22
-— prior guesses based on third-party blog posts were wrong on one key
-point, see the change log below): when a customer has hidden their
-number, `messages[].from` is **absent entirely** (not present-but-odd)
-and the identifier instead lives in `messages[].from_user_id` —
-mirrored on `contacts[].user_id` — format `CC.digits`, e.g.
-`PE.1128521366369305` ("PE" = the country code, matching the business
-number's own country in the observed case; the digit run after the dot
-may not always be all-digits, don't assume it). `contacts[].wa_id` is
-also absent for such a contact. `contacts[].profile` additionally
-carries an optional `username` (plain ASCII, the customer's real
-@handle, e.g. `"thali.vd_"`) alongside `name`, which for a
-username-having customer can be a **decorative Unicode string**
-(stylized mathematical-alphanumeric symbols) that renders as garbled
-boxes in the inbox — prefer `username` over `name` when present.
+Meta's "WhatsApp usernames" rollout (live since 2026-03-31) lets a
+customer hide their phone number from a business. **Confirmed against a
+real payload from an affected account** (2026-08-22): for such a sender
+`messages[].from` and `contacts[].wa_id` are **absent entirely**, and
+the identifier lives in `messages[].from_user_id` — mirrored on
+`contacts[].user_id` — a *business-scoped user id* (BSUID) of the form
+`CC.digits`, e.g. `PE.1128521366369305` (plus an optional portfolio
+level `from_parent_user_id` / `parent_user_id`, `CC.ENT.digits`).
+`contacts[].profile` also carries an optional `username` (plain ASCII,
+the real @handle, e.g. `"thali.vd_"`) next to `name`, which for a
+username-having customer is often a **decorative Unicode string** that
+renders as boxes in the inbox.
 
-`processMessage` (`src/app/api/whatsapp/webhook/route.ts`) resolves the
-sender id with `message.from ?? message.from_user_id ?? contact.user_id
-?? ''`, and the display name with `contact.profile.username ||
-contact.profile.name`. `findOrCreateContact` detects a non-phone id by
-checking the **raw** string against `/^\+?\d{5,15}$/` — deliberately not
-by checking whether `normalizePhone(id)` came out empty, since a BSUID
-can contain enough stray digits to normalize into a plausible-looking
-(and possibly colliding) fake phone number. When it doesn't look like a
-phone, the raw id is used as an exact-match dedup/storage key instead of
-going through `findExistingContact`'s digit-suffix `phonesMatch` logic.
+Since the 2026-11 upstream merge the plumbing is **upstream's**
+(issue #519: `src/lib/whatsapp/wa-identity.ts`, migration 040) with
+**the fork's guarantees layered on top**. The two started from opposite
+assumptions, and the difference is the thing to preserve:
 
-That username-preferring `name` is only ever written to an **existing**
-contact's `name` column when the column is currently empty
-(`if (name && !existingContact.name)`, both in the username-match
-branch and the phone/BSUID-fallback branch) — never as an
-unconditional overwrite. A contact's name is set once, either at
-creation or the first time staff/automation fills it in; every later
-inbound message only refreshes `wa_user_id`/`wa_username`/`phone`
-(routing/identity data), never `name` again. This matters because
-`name` naturally prefers the WhatsApp @handle over `profile.name` (see
-above) — without the "only if empty" guard, a customer's real name
-entered by staff (e.g. "Mario") would get silently renamed back to
-their raw username (e.g. "mariof737") on every subsequent message, since
-the two will almost always differ (bug reported and fixed 2026-08-23,
-see change log).
+| | Upstream | This fork |
+|---|---|---|
+| BSUID | the stable identity; unique per account | a routing token — **seen to rotate** for a returning customer in production |
+| @username | display only, "never an identity key" | the durable identity; looked up **first** |
+| `name` on an existing contact | rewritten whenever Meta's differs | filled once, **never overwritten** |
 
-**Update, 2026-08-22 (same day, later): the BSUID token itself is not a
-stable identity.** Deduping purely on `wa_user_id`/`from_user_id` (the
-paragraphs above) breaks once Meta rotates that token for a returning
-customer — confirmed in production: a contact whose real phone had
-already been saved manually still got a second "new" row under a fresh
-BSUID. The one signal that *is* durable is `contacts[].profile.username`
-(the public @handle, e.g. `"thali.vd_"` — plain ASCII, unlike the
-possibly-decorative `name`). Migration
-[040_wa_username_identity.sql](supabase/migrations/040_wa_username_identity.sql)
-adds it as a proper identity column, so contact identity for a
-WhatsApp-usernames customer is now a **three-signal model**:
+**Schema.** Upstream 040: `contacts.wa_user_id`, `wa_parent_user_id`,
+`wa_username` and a unique index on `(account_id, wa_user_id)`. Fork
+902: generated `wa_username_normalized` (lowercased) + a per-account
+unique index, mirroring migration 022's `phone_normalized`. Fork 906:
+`merge_contacts()` and `claim_contact_wa_user_id()`.
 
-1. **`phone`** — the real, stable identifier when Meta discloses it
-   (unchanged, still `NOT NULL`, still drives `phone_normalized` +
-   migration 022's per-account unique index).
-2. **`wa_username`** (+ generated `wa_username_normalized`, lowercased,
-   unique per account when non-null) — the durable identity for a
-   customer who has hidden her number. `processMessage` checks this
-   **first**, before the phone/BSUID fallback: a match here reuses the
-   contact regardless of what token or phone-like value shows up this
-   time. Editable by staff (`contact-form.tsx`'s create/edit dialog,
-   `contact-detail-view.tsx`'s Details tab) to manually link a known
-   username onto an existing phone-having contact.
-3. **`wa_user_id`** — the current/last-known BSUID routing token.
-   Refreshed automatically on every inbound message; deliberately has
-   no uniqueness constraint (plain index only) since it can rotate and
-   two rows could transiently share a stale value. Read-only in the
-   UI. Now also used for outbound sends — see below.
+**`phone` for a hidden-number contact is `''`** (upstream's convention;
+the column stays NOT NULL and migration 022's partial unique index
+skips empty values). Before the merge the fork *parked the BSUID in
+`phone`*; such rows exist until the one-off cleanup
+(`supabase/upgrade/2026-11/B2_…`) has run, so every reader tolerates
+both shapes: `resolveContactSendTarget` and `contactHandle`
+(`wa-identity.ts`) test the **raw** value with `isBusinessScopedUserId`
+before treating it as a phone — `sanitizePhoneForMeta` strips
+non-digits, so `"US.987654321"` would otherwise be sent to the
+stranger at `987654321` — and the webhook has
+`findContactByParkedBsuid`. `looksLikePhoneNumber`
+(`phone-utils.ts`) remains for the AI customer context, push titles and
+the contacts list, which must never present a token as a phone number.
 
-Capture is **opportunistic**: even a message that arrives with a real,
-visible phone number also gets its `wa_username`/`wa_user_id` stored (if
-present and not already known) onto that same contact, so if that same
-customer later hides her number, the system already knows who she is —
-no manual linking needed for anyone captured this way. Manual linking
-(step 2 above) exists for the case where the BSUID-only contact and the
-phone-having contact were already created as two separate rows *before*
-this existed.
+**Inbound** (`src/app/api/whatsapp/webhook/route.ts`):
+`resolveInboundIdentity` → `findOrCreateContact`, lookup order
+**username → BSUID → phone → legacy parked BSUID**. A match goes
+through `applyInboundIdentity`, which never throws and differs from
+upstream's single-UPDATE `contactIdentityPatch` on purpose:
 
-**Cleaning up a pre-existing duplicate pair**: `merge_contacts(survivor,
-loser)` (same migration) re-points a loser contact's conversations,
-notes, deals, tags, custom values, and non-active flow runs onto a
-survivor and deletes the loser — same table breakdown as migration 022's
-`merge_duplicate_contacts()`, but for an explicit id pair chosen by
-staff rather than an automatic phone-group scan. `SECURITY DEFINER`,
-`EXECUTE` granted to `service_role` only (never `authenticated` — it
-bypasses RLS and deletes rows, so it must never be reachable by direct
-RPC from the browser client). The only caller is
-`POST /api/contacts/[id]/merge`
-([route.ts](<src/app/api/contacts/[id]/merge/route.ts>)), which requires
-the `admin` role and verifies both contact ids belong to the caller's
-own account before invoking the RPC through
-[src/lib/contacts/admin-client.ts](src/lib/contacts/admin-client.ts)'s
-service-role client — the API route is the only place that
-authorization happens; the SQL function trusts its caller completely.
-Reachable from `contact-detail-view.tsx`'s "Merge with another contact"
-button (search-and-confirm dialog).
+- **Split writes** — profile fields, then username, then BSUID. Each of
+  the three identity columns has its own unique index; in one UPDATE a
+  conflict on any of them discards all of them.
+- **`name` is fill-only.** Written when the contact has no name or a
+  placeholder (`hasPlaceholderName`: empty, the phone number, or a
+  BSUID standing in for a name). The label prefers the @username, which
+  almost never equals a name staff typed — an unconditional write
+  renamed "Mario" back to "mariof737" on every message (2026-08-23).
+- **Phone** fills a blank (or replaces a parked token); on a username
+  match a *different* number also replaces the stored one (the customer
+  changed phones).
+- **Username** is captured opportunistically, even alongside a visible
+  phone, so a customer who later hides the number is already known.
+- **The BSUID is claimed, not just written** —
+  `claim_contact_wa_user_id` moves the token here atomically, releasing
+  it from whichever other contact held it. That is the "username matches
+  A but the token is on a stale duplicate C" case: the thread stays on A
+  (username wins), A owns the token so replies are addressable, and
+  `flagPossibleDuplicate` leaves a note on both contacts. **The webhook
+  never merges** — a merge deletes a row and is a human decision.
 
-**Outbound sending to a username-only/BSUID-only contact now works**
-(see the 2026-08-22 "Outbound sends via `recipient`" entry below) for
-Inbox replies, the public messages API, Flows, Automations, and
-reactions — every one-to-one/conversational send path builds a Meta
-`recipient` field (the BSUID) instead of `to` (phone-only) when
-`contacts.phone` isn't a real phone number. **Broadcasts (campaign
-sends) are the one remaining gap** — `src/lib/whatsapp/broadcast-core.ts`
-and `src/app/api/whatsapp/broadcast/route.ts` never query `contacts` at
-send time (they're phone-string-driven end to end), so there's no
-`wa_user_id` to route through without new schema/UI plumbing. Not yet
-started.
+A brand-new contact is named after the @username when there is one
+(`inboundDisplayName`), then upstream's name → phone → BSUID ladder.
+A delivery with neither a phone nor a BSUID is dropped loudly rather
+than turned into an unreachable row.
+
+**Outbound.** Upstream's design, adopted as-is: every sender in
+`src/lib/whatsapp/meta-api.ts` takes `to: string` and a private
+`recipientFields(to)` emits Meta's `recipient` field for a BSUID-shaped
+value, `to` otherwise. Callers (`send-message.ts`,
+`flows/meta-send.ts`, `automations/meta-send.ts`,
+`api/whatsapp/react`) get the address from
+`resolveContactSendTarget(contact)` → `{target, isPhone}`; the
+trunk-prefix variant retry and the "auto-correct `contacts.phone`"
+write only run when `isPhone`. (The fork's earlier typed
+`RecipientTarget` union was dropped in the merge.) **Broadcasts remain
+phone-only** on both sides — they never read `contacts` at send time.
+
+**Staff tools.** The WhatsApp-username field is editable in the contact
+form and the Details tab (links a known handle onto an existing
+contact); both forms accept an empty phone when the contact has a
+WhatsApp identity. "Merge with another contact" →
+`POST /api/contacts/[id]/merge` (admin only; verifies both ids belong
+to the caller's account, then calls `merge_contacts` through the
+service-role client in `src/lib/contacts/admin-client.ts`).
+`merge_contacts` (906) **folds** the loser's conversation into the
+survivor's — migration 036 allows one conversation per contact, so a
+plain re-point fails whenever both have one — and **deletes the loser
+before copying its identity**, so none of the three unique indexes can
+be tripped; the BSUID kept is the one from the most recent inbound.
+It is `SECURITY DEFINER`, executable by `service_role` only, and trusts
+its caller completely.
+
+Rejected, for the record: a third-party "BSUID integration guide"
+describing a `business_scoped_user_id` field and an always-present
+`wa_id`. Both contradict the captured payload and Meta's own docs.
 
 
 ## PWA / installed-app baseline (`src/app/manifest.ts`, safe areas)
@@ -2164,3 +2262,114 @@ lists `/api/push/diagnostics`. Not verified against the deployed app —
 the user is to deploy, open Settings → Push notifications, apply the
 waiting update if the card shows one, run "Send a test", then run
 "Diagnostics" → "Copy result" and paste it back.
+
+## 2026-11-21 — Merge upstream (`main-original`, 233 commits) into the fork
+
+The fork had fallen behind `ArnasDon/wacrm` by 233 commits (126
+non-merge, 440 files, base `6ed9191` from 2026-08-12): security fixes
+(three GHSAs, SSRF guard, authz and RLS holes, anon grants on internal
+functions), Next 16.3.8 / Node 22, integrity work on the webhook, flows,
+automations and broadcasts, the action-first dashboard, `/auth/callback`
+and `/reset-password`, ~1,050 new i18n keys with `pt`/`es` catalogues,
+an OpenAI-compatible provider, and upstream's own BSUID support. User
+asked to bring all of it in without breaking anything of theirs. Done
+as a real merge on `integracion-upstream` (so the next sync is small);
+see **"Keeping in sync with upstream"** above for the rules this
+session established and the rewritten **"WhatsApp contact identity"**
+section for the largest reconciliation.
+
+`git merge` reported 40 conflicted files; the dangerous part was what
+it did **not** report. Found and fixed, none of them a textual
+conflict:
+
+- **Upstream's migration 046 would have removed OpenRouter.** It
+  re-creates both `provider` CHECKs as
+  `('openai','anthropic','openai_compatible')`; on the production
+  database, which has `openrouter` rows, the statement fails outright.
+  046 is left untouched in git; the fork's provider migration was
+  rewritten with all four values (`900`), and production gets
+  `A_046_cuatro_proveedores.sql`.
+- **`inboundMessageId` meant two things.** The fork passed the
+  `messages.id` UUID (audit row), upstream passed Meta's wamid (typing
+  indicator + "customer wrote again" check) under the same name. Merged
+  naively the bot would have treated every message as superseded and
+  never replied. Now two fields; a test pins them apart.
+- **Upstream's unique index on `wa_user_id`** vs the fork's deliberately
+  non-unique one: with the index in place and the *old* code still
+  running, a hidden-number customer's message is lost (unique violation
+  after the 200 to Meta). Hence the two-phase production upgrade.
+- **`merge_contacts` had three latent defects** against the current
+  schema (re-pointing a conversation into a contact that already has
+  one; copying a username/BSUID while the loser still held it).
+  Rewritten in `906`.
+- **Upstream's send-target helper strips non-digits** before validating
+  a phone, so a BSUID parked in `phone` by the pre-merge fork with ≤15
+  digits would have been messaged as a phone number. Guarded.
+- **`redeem_invitation` deletes the caller's old account** when it holds
+  no data, per an explicit table list that did not know the fork's
+  tables. `907` adds `salon_booking_configs` and `ai_reply_events` to
+  the guard and carries `push_subscriptions` over. (Caught by
+  upstream's own migration-coverage test.)
+- Flows: `create_salon_appointment` added to
+  `AUTO_ADVANCING_NODE_TYPES` (runs would have stalled on the node) and
+  its `NODE_META` entry moved to `slugSeed` (would not compile).
+
+Decisions taken with the user: keep the fork's Spanish wording wherever
+it already existed (388 keys) and take upstream's for the new ones;
+leave upstream's tab-only browser notifications unmounted; migrations
+are applied by hand in the SQL editor; production is the only database.
+
+Touched (by area — the merge itself brings ~440 upstream files):
+
+- `supabase/migrations/` — fork migrations renamed into the 900 range;
+  `900` rewritten; `902` trimmed; new `906_identity_reconcile.sql` and
+  `907_redeem_invitation_fork_tables.sql`; fork assertions added to
+  `supabase/ci/verify-schema.sql`.
+- `supabase/upgrade/2026-11/` — new: `LEEME.md` (runbook, in Spanish),
+  `00_prechecks.sql`, `A_040_solo_columnas.sql`,
+  `A_046_cuatro_proveedores.sql`, `B1_duplicados.sql`,
+  `B2_mover_bsuid_aparcados.sql`, `B3_indice_unico.sql`.
+- `src/lib/whatsapp/` — upstream's `wa-identity.ts` + `to: string`
+  senders adopted; `phone-utils.ts` loses `RecipientTarget` /
+  `resolveRecipientTarget`, keeps `looksLikePhoneNumber`;
+  `resolveContactSendTarget` / `contactHandle` hardened for legacy rows.
+- `src/app/api/whatsapp/webhook/route.ts` — upstream's version with
+  transcription, the push call and a rewritten contact resolution
+  (`findContactByWaUsername`, `findContactByParkedBsuid`,
+  `applyInboundIdentity`, `hasPlaceholderName`, `flagPossibleDuplicate`).
+- `src/lib/ai/` — four providers; `auto-reply.ts` as described in the
+  AI section; reasons `superseded` / `taken_over` in `reply-events.ts`,
+  `src/lib/push/inbound.ts` and the catalogues; `knowledge.ts` takes the
+  fork's `AuxiliaryEndpoint` and returns upstream's `IngestResult`.
+- `messages/{en,ko,es,pt}.json` — rebuilt by rule (2,712 keys each).
+- UI: `dashboard-shell.tsx`, `message-composer.tsx` (fork's two rows +
+  upstream's touch-Enter and translated gate reason),
+  `ai-thread-banner.tsx`, `contact-detail-view.tsx`, `contact-form.tsx`,
+  `profile-form.tsx`, `signup` / `reset-password`,
+  `src/lib/auth/callback.ts`, `next.config.ts` (`/icons/*` cacheable).
+- Tests: the webhook, auto-reply, send-path, knowledge and auth-callback
+  suites merged from both sides, plus new cases for every item in the
+  list above.
+
+Verified: `npx tsc --noEmit` clean (app code); `npx eslint src` 0
+errors (40 pre-existing warnings); `npx vitest run` **1,879 / 1,879
+in 167 files** — including the two `date-utils.test.ts` cases that had
+failed in every earlier session (fixed upstream); `next build` with
+`NEXT_PUBLIC_APP_LOCALE=es` succeeds and lists every fork route;
+`next start` + `curl`: `/sw.js` → `no-cache`, `/icons/*` → `public,
+max-age=86400`, `/` → 307 `/inbox`, `/offline` in Spanish, title
+`MlennyChatBot`.
+
+**Not verified:** anything that needs Meta, OpenRouter, the salon API or
+the Supabase project — no credentials in this session. In particular
+none of the SQL in `supabase/upgrade/2026-11/` or migrations 906/907 has
+been executed against a real database (the upstream CI job that runs
+`supabase db reset` + `verify-schema.sql` would exercise 900–907 on a
+fresh one). The runbook asks for a backup first and offers
+`BEGIN … ROLLBACK` as a dry run. The 13-point manual checklist in
+`LEEME.md` is the acceptance test.
+
+> **Production upgrade required** — follow
+> `supabase/upgrade/2026-11/LEEME.md` in order: Phase A migrations →
+> deploy → observe → Phase B. Deploying the code before Phase A will
+> break the app; applying Phase B before deploying will lose messages.

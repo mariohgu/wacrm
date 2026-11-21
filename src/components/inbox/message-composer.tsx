@@ -142,11 +142,26 @@ export function MessageComposer({
   onClearReply,
 }: MessageComposerProps) {
   const t = useTranslations("Inbox.composer");
+  const tGate = useTranslations("GatedButton");
 
   const [text, setText] = useState("");
   const [sending, setSending] = useState(false);
   const [drafting, setDrafting] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+
+  // Enter-to-send only on devices with a mouse/keyboard (fine pointer).
+  // On touch devices (phones) Enter inserts a newline and the Send button
+  // is the only way to send — there's no practical Shift+Enter on a phone,
+  // so intercepting Enter there blocks multi-line messages.
+  const [enterSends, setEnterSends] = useState(false);
+  useEffect(() => {
+    if (typeof window === "undefined" || !window.matchMedia) return;
+    const mq = window.matchMedia("(pointer: fine)");
+    const apply = () => setEnterSends(mq.matches);
+    apply();
+    mq.addEventListener?.("change", apply);
+    return () => mq.removeEventListener?.("change", apply);
+  }, []);
 
   // Interactive-message builder dialog + quick-reply picker.
   const [interactiveOpen, setInteractiveOpen] = useState(false);
@@ -238,12 +253,12 @@ export function MessageComposer({
 
   const handleKeyDown = useCallback(
     (e: KeyboardEvent<HTMLTextAreaElement>) => {
-      if (e.key === "Enter" && !e.shiftKey) {
+      if (e.key === "Enter" && !e.shiftKey && enterSends) {
         e.preventDefault();
         handleSend();
       }
     },
-    [handleSend]
+    [handleSend, enterSends]
   );
 
   const handleChange = useCallback(
@@ -269,15 +284,15 @@ export function MessageComposer({
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
         if (data.code === "ai_not_configured") {
-          toast.error("AI isn't set up yet — enable it in Settings → AI Assistant.");
+          toast.error(t("aiNotConfigured"));
         } else {
-          toast.error(data.error ?? "Couldn't draft a reply.");
+          toast.error(data.error ?? t("draftFailed"));
         }
         return;
       }
       const draftText = typeof data.draft === "string" ? data.draft.trim() : "";
       if (!draftText) {
-        toast.error("The assistant didn't return a reply.");
+        toast.error(t("draftEmpty"));
         return;
       }
       setText(draftText);
@@ -292,11 +307,11 @@ export function MessageComposer({
         }
       });
     } catch {
-      toast.error("Couldn't reach the AI assistant.");
+      toast.error(t("aiUnreachable"));
     } finally {
       setDrafting(false);
     }
-  }, [drafting, conversationId, adjustHeight]);
+  }, [drafting, conversationId, adjustHeight, t]);
 
   // ---- Interactive message + quick replies --------------------------
 
@@ -390,9 +405,11 @@ export function MessageComposer({
       const max = MEDIA_MAX_BYTES_BY_KIND[kind];
       if (file.size > max) {
         toast.error(
-          `File is ${(file.size / 1024 / 1024).toFixed(1)} MB — ${kind} limit is ${Math.round(
-            max / 1024 / 1024,
-          )} MB.`,
+          t("fileTooLarge", {
+            size: (file.size / 1024 / 1024).toFixed(1),
+            kind: t(`mediaKind.${kind}`),
+            max: Math.round(max / 1024 / 1024),
+          }),
         );
         return;
       }
@@ -403,12 +420,12 @@ export function MessageComposer({
         removeStaged(draftRef.current?.path);
         setDraft({ kind, mediaUrl: publicUrl, path, filename: file.name, caption: "" });
       } catch (err) {
-        toast.error(err instanceof Error ? err.message : "Upload failed.");
+        toast.error(err instanceof Error ? err.message : t("uploadFailed"));
       } finally {
         setBusy(false);
       }
     },
-    [removeStaged],
+    [removeStaged, t],
   );
 
   const handlePicked = useCallback(
@@ -431,7 +448,7 @@ export function MessageComposer({
       });
       if (file.size === 0) return; // cancelled / empty take
       if (file.size > MEDIA_MAX_BYTES_BY_KIND.audio) {
-        toast.error("Recording is too long (over 16 MB).");
+        toast.error(t("recordingTooLong"));
         return;
       }
       setBusy(true);
@@ -440,18 +457,18 @@ export function MessageComposer({
         removeStaged(draftRef.current?.path);
         setDraft({ kind: "audio", mediaUrl: publicUrl, path, filename: file.name, caption: "" });
       } catch (err) {
-        toast.error(err instanceof Error ? err.message : "Upload failed.");
+        toast.error(err instanceof Error ? err.message : t("uploadFailed"));
       } finally {
         setBusy(false);
       }
     },
-    [removeStaged],
+    [removeStaged, t],
   );
 
   const startRecording = useCallback(async () => {
     if (inputsDisabled || busy || recording) return;
     if (!navigator.mediaDevices?.getUserMedia || typeof AudioContext === "undefined") {
-      toast.error("Voice recording isn't supported in this browser.");
+      toast.error(t("recordingUnsupported"));
       return;
     }
     try {
@@ -478,9 +495,9 @@ export function MessageComposer({
     } catch {
       void recorderRef.current?.stop().catch(() => {});
       recorderRef.current = null;
-      toast.error("Microphone access denied or unavailable.");
+      toast.error(t("microphoneDenied"));
     }
-  }, [inputsDisabled, busy, recording, finalizeRecording]);
+  }, [inputsDisabled, busy, recording, finalizeRecording, t]);
 
   const stopRecording = useCallback(() => {
     clearTimer();
@@ -656,7 +673,7 @@ export function MessageComposer({
               // The placeholder text also surfaces the read-only state.
               title={readOnly ? t("readOnlyTitle") : undefined}
               className={cn(
-                "flex-1 resize-none rounded-xl border border-border bg-muted px-4 py-2.5 text-sm text-foreground placeholder-muted-foreground outline-none transition-colors focus:border-primary/50",
+                "min-w-0 flex-1 resize-none rounded-xl border border-border bg-muted px-4 py-2.5 text-sm text-foreground placeholder-muted-foreground outline-none transition-colors focus:border-primary/50",
                 (sessionExpired || readOnly) && "cursor-not-allowed opacity-50"
               )}
             />
@@ -664,7 +681,7 @@ export function MessageComposer({
             <GatedButton
               size="sm"
               canAct={!readOnly}
-              gateReason="send messages"
+              gateReason={tGate("reasons.sendMessages")}
               disabled={!text.trim() || sessionExpired || sending}
               onClick={handleSend}
               className="h-9 w-9 shrink-0 bg-primary p-0 hover:bg-primary/90 disabled:opacity-40"
@@ -749,7 +766,7 @@ export function MessageComposer({
               variant="ghost"
               size="sm"
               canAct={!readOnly}
-              gateReason="send messages"
+              gateReason={tGate("reasons.sendMessages")}
               title={readOnly ? undefined : t("sendTemplate")}
               className="h-9 w-9 shrink-0 p-0 text-muted-foreground hover:text-foreground"
               onClick={onOpenTemplates}
@@ -761,7 +778,7 @@ export function MessageComposer({
               variant="ghost"
               size="sm"
               canAct={!readOnly}
-              gateReason="send messages"
+              gateReason={tGate("reasons.sendMessages")}
               disabled={drafting}
               title={readOnly ? undefined : t("draftWithAI")}
               className="h-9 w-9 shrink-0 p-0 text-muted-foreground hover:text-primary"
@@ -847,6 +864,7 @@ function MediaDraftPreview({
   onSend: () => void;
   t: ReturnType<typeof useTranslations>;
 }) {
+  const tGate = useTranslations("GatedButton");
   return (
     <div className="rounded-xl border border-border bg-muted/40 p-3">
       <div className="flex items-start gap-3">
@@ -901,7 +919,7 @@ function MediaDraftPreview({
         <GatedButton
           size="sm"
           canAct={!readOnly}
-          gateReason="send messages"
+          gateReason={tGate("reasons.sendMessages")}
           disabled={busy}
           onClick={onSend}
           className={cn(

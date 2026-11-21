@@ -12,7 +12,7 @@ import type { SupabaseClient } from '@supabase/supabase-js';
 import { findExistingContact, isUniqueViolation } from '@/lib/contacts/dedupe';
 import { resolveImportTagIds } from '@/lib/contacts/resolve-import-tags';
 import { addContactTagAndDispatch } from '@/lib/contacts/tag-events';
-import { sanitizePhoneForMeta, isValidE164 } from '@/lib/whatsapp/phone-utils';
+import { parseInternationalPhone } from '@/lib/whatsapp/phone-utils';
 
 /** Row select that embeds the contact's tags for serialization. */
 export const CONTACT_SELECT = '*, contact_tags(tags(*))';
@@ -113,10 +113,14 @@ export async function findOrCreateContact(
   auditUserId: string,
   input: ContactInput
 ): Promise<{ id: string; created: boolean }> {
-  const sanitized = sanitizePhoneForMeta(input.phone);
-  if (!isValidE164(sanitized)) {
+  // Raw integrator input: the leading `+` is required so the country
+  // code is explicit. A national-format number ("4155551212") would
+  // otherwise be persisted and then misdelivered on every later send
+  // (issue #586).
+  const sanitized = parseInternationalPhone(input.phone);
+  if (!sanitized) {
     throw new ContactError(
-      "'phone' must be a valid phone number in E.164 format (e.g. +14155550123)",
+      "'phone' must be an international phone number with a leading + and country code (e.g. +14155550123)",
       400
     );
   }
@@ -153,9 +157,9 @@ export async function findOrCreateContact(
 
 /**
  * Replace a contact's tags to exactly match `tagNames` (case-
- * insensitive; missing tags are created). A no-op when `tagNames` is
- * undefined — pass `[]` to clear all tags. Reuses `resolveImportTagIds`
- * so API and CSV-import tag handling stay consistent.
+ * insensitive; missing tags are created). Pass `[]` to clear all tags.
+ * Reuses `resolveImportTagIds` so API and CSV-import tag handling stay
+ * consistent.
  */
 export async function setContactTags(
   db: SupabaseClient,
@@ -164,13 +168,42 @@ export async function setContactTags(
   contactId: string,
   tagNames: string[]
 ): Promise<void> {
+  await syncContactTags(db, accountId, auditUserId, contactId, tagNames, true);
+}
+
+export async function addContactTags(
+  db: SupabaseClient,
+  accountId: string,
+  auditUserId: string,
+  contactId: string,
+  tagNames: string[]
+): Promise<void> {
+  await syncContactTags(db, accountId, auditUserId, contactId, tagNames, false);
+}
+
+async function syncContactTags(
+  db: SupabaseClient,
+  accountId: string,
+  auditUserId: string,
+  contactId: string,
+  tagNames: string[],
+  removeUnrequested: boolean
+): Promise<void> {
   const { tagIdByKey } = await resolveImportTagIds(db, {
     accountId,
     userId: auditUserId,
     tagNames,
     canCreateTags: true,
   });
-  const desired = new Set(tagIdByKey.values());
+  // Same normalization `resolveImportTagIds` applies to `tagNames`
+  // (trim, lowercase, skip empty) so every requested name resolves.
+  const desired = new Set<string>();
+  for (const raw of tagNames) {
+    const key = raw.trim().toLowerCase();
+    if (!key) continue;
+    const tagId = tagIdByKey.get(key);
+    if (tagId) desired.add(tagId);
+  }
 
   // Diff against the current joins rather than delete-all-then-insert:
   // a diff only touches tags that actually change, so a mid-operation
@@ -189,7 +222,9 @@ export async function setContactTags(
   );
 
   const toAdd = [...desired].filter((id) => !existing.has(id));
-  const toRemove = [...existing].filter((id) => !desired.has(id));
+  const toRemove = removeUnrequested
+    ? [...existing].filter((id) => !desired.has(id))
+    : [];
 
   if (toRemove.length > 0) {
     const { error } = await db
@@ -231,3 +266,5 @@ export async function getContactById(
   if (error || !data) return null;
   return serializeContact(data as Record<string, unknown>);
 }
+
+export { contactSearchFilter } from '@/lib/contacts/search-filter';

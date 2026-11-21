@@ -184,7 +184,7 @@ export function ProfileForm() {
           : t('profileSaved'),
       );
     } catch (err) {
-      const msg = err instanceof Error ? err.message : 'Unknown error';
+      const msg = err instanceof Error ? err.message : t('unknownError');
       toast.error(msg);
     } finally {
       setSaving(false);
@@ -219,7 +219,7 @@ export function ProfileForm() {
           <div className="flex flex-wrap items-center gap-5">
             <Avatar size="lg" className="size-16">
               {currentAvatar ? (
-                <AvatarImage src={currentAvatar} alt={fullName || 'Avatar'} />
+                <AvatarImage src={currentAvatar} alt={fullName || t('avatarAlt')} />
               ) : null}
               <AvatarFallback className="bg-primary/10 text-base text-primary">
                 {initial}
@@ -270,7 +270,7 @@ export function ProfileForm() {
               id="profile-full-name"
               value={fullName}
               onChange={(e) => setFullName(e.target.value)}
-              placeholder="Ada Lovelace"
+              placeholder={t('fullNamePlaceholder')}
               maxLength={120}
               disabled={saving}
               required
@@ -352,6 +352,13 @@ export function ProfileForm() {
           </Button>
         </div>
       </form>
+
+      {/* FORK: upstream renders <BrowserNotificationsCard /> here (tab-only
+          desktop alerts, opt-in). Deliberately not offered — this fork's
+          Web Push (Settings → Push notifications) already covers a new
+          inbound message, also with the app closed, and running both
+          notifies twice. The component and its listener are kept in the
+          tree, unmounted, to keep upstream merges clean. */}
     </section>
   );
 }

@@ -31,6 +31,7 @@ import type { AiProvider } from '@/lib/ai/types';
 import type { AccountMember } from '@/types';
 import { fetchAccountMembers, memberLabel } from '@/lib/account/members';
 import { useTranslations } from 'next-intl';
+import { invalidateAiAccountStatus } from '@/lib/ai/account-status-cache';
 
 const MASKED_KEY = '••••••••••••••••';
 
@@ -38,7 +39,7 @@ const MASKED_KEY = '••••••••••••••••';
 // unassigned" choice gets a sentinel that maps to null in the payload.
 const HANDOFF_QUEUE = '__queue__';
 
-const PROVIDER_LABEL: Record<AiProvider, string> = {
+const PROVIDER_LABEL: Record<Exclude<AiProvider, 'openai_compatible'>, string> = {
   openai: 'OpenAI',
   anthropic: 'Anthropic (Claude)',
   openrouter: 'OpenRouter',
@@ -48,6 +49,7 @@ const KEY_PLACEHOLDER: Record<AiProvider, string> = {
   openai: 'sk-...',
   anthropic: 'sk-ant-...',
   openrouter: 'sk-or-v1-...',
+  openai_compatible: 'your-api-key',
 };
 
 export function AiConfig() {
@@ -63,6 +65,7 @@ export function AiConfig() {
   const [configured, setConfigured] = useState(false);
   const [provider, setProvider] = useState<AiProvider>('openai');
   const [model, setModel] = useState(AI_PROVIDER_DEFAULT_MODEL.openai);
+  const [baseUrl, setBaseUrl] = useState('');
   const [apiKey, setApiKey] = useState('');
   const [keyEdited, setKeyEdited] = useState(false);
   const [showKey, setShowKey] = useState(false);
@@ -101,6 +104,7 @@ export function AiConfig() {
         setConfigured(true);
         setProvider(data.provider);
         setModel(data.model);
+        setBaseUrl(data.base_url ?? '');
         setSystemPrompt(data.system_prompt ?? '');
         setIsActive(data.is_active);
         setAutoReplyEnabled(data.auto_reply_enabled);
@@ -142,8 +146,9 @@ export function AiConfig() {
       model === AI_PROVIDER_DEFAULT_MODEL.openai ||
       model === AI_PROVIDER_DEFAULT_MODEL.anthropic ||
       model === AI_PROVIDER_DEFAULT_MODEL.openrouter ||
+      model === AI_PROVIDER_DEFAULT_MODEL.openai_compatible ||
       model.trim() === '';
-    if (isDefaultModel) setModel(AI_PROVIDER_DEFAULT_MODEL[next]);
+    if (isDefaultModel) setModel(next === 'openai_compatible' ? '' : AI_PROVIDER_DEFAULT_MODEL[next]);
   };
 
   const keyPayload = () => (keyEdited ? apiKey.trim() : undefined);
@@ -158,6 +163,7 @@ export function AiConfig() {
   const buildBody = () => ({
     provider,
     model: model.trim(),
+    base_url: provider === 'openai_compatible' ? baseUrl.trim() : null,
     api_key: keyPayload(),
     embeddings_api_key: embeddingsKeyPayload(),
     transcription_api_key: transcriptionKeyPayload(),
@@ -178,6 +184,7 @@ export function AiConfig() {
         body: JSON.stringify({
           provider,
           model: model.trim(),
+          base_url: provider === 'openai_compatible' ? baseUrl.trim() : null,
           api_key: keyPayload(),
         }),
       });
@@ -196,6 +203,10 @@ export function AiConfig() {
       toast.error(t('missingModel'));
       return;
     }
+    if (provider === 'openai_compatible' && !baseUrl.trim()) {
+      toast.error(t('missingBaseUrl'));
+      return;
+    }
     if (!configured && !keyEdited) {
       toast.error(t('missingApiKey'));
       return;
@@ -209,6 +220,7 @@ export function AiConfig() {
       });
       const data = await res.json();
       if (res.ok) {
+        invalidateAiAccountStatus();
         toast.success(t('saveSuccess'));
         await fetchConfig();
       } else {
@@ -226,8 +238,10 @@ export function AiConfig() {
     try {
       const res = await fetch('/api/ai/config', { method: 'DELETE' });
       if (res.ok) {
+        invalidateAiAccountStatus();
         toast.success(t('removeSuccess'));
         setConfigured(false);
+        setBaseUrl('');
         setHasStoredKey(false);
         setApiKey('');
         setKeyEdited(false);
@@ -307,6 +321,9 @@ export function AiConfig() {
                     <SelectItem value="openrouter">
                       {PROVIDER_LABEL.openrouter}
                     </SelectItem>
+                    <SelectItem value="openai_compatible">
+                      {t('providerOpenAiCompatible')}
+                    </SelectItem>
                   </SelectContent>
                 </Select>
               </div>
@@ -321,6 +338,21 @@ export function AiConfig() {
                   disabled={disabled}
                 />
               </div>
+
+              {provider === 'openai_compatible' && (
+                <div className="space-y-2">
+                  <Label htmlFor="ai-base-url">{t('baseUrl')}</Label>
+                  <Input
+                    id="ai-base-url"
+                    value={baseUrl}
+                    onChange={(e) => setBaseUrl(e.target.value)}
+                    placeholder="https://api.example.com/v1"
+                    disabled={disabled}
+                    autoComplete="off"
+                  />
+                  <p className="text-xs text-muted-foreground">{t('baseUrlHint')}</p>
+                </div>
+              )}
             </div>
 
             <div className="space-y-2">

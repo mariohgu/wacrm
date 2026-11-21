@@ -72,6 +72,19 @@ import {
   type StepPath,
 } from "@/lib/automations/builder-tree"
 import { cn } from "@/lib/utils"
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select"
+import {
+  LEGACY_CONDITION_TIMEZONE,
+  browserTimeZone,
+  editConditionConfig,
+  listTimeZones,
+} from "@/lib/automations/time-of-day"
 
 // ------------------------------------------------------------
 // Types (builder-local — mirror the flattened rows we POST)
@@ -80,6 +93,7 @@ import { cn } from "@/lib/utils"
 export interface BuilderStep {
   /** Client id; the API assigns real UUIDs server-side. */
   cid: string
+  id?: string
   step_type: AutomationStepType
   step_config: Record<string, unknown>
   branches?: { yes: BuilderStep[]; no: BuilderStep[] }
@@ -156,6 +170,12 @@ function cid(): string {
       ? crypto.randomUUID()
       : Math.random().toString(36).slice(2) + Date.now().toString(36))
   )
+}
+
+function newStepId(): string | undefined {
+  return typeof crypto !== "undefined" && "randomUUID" in crypto
+    ? crypto.randomUUID()
+    : undefined
 }
 
 // The send_buttons / send_list step_config IS an InteractiveMessagePayload,
@@ -653,6 +673,7 @@ export function AutomationBuilder({ initial }: { initial: BuilderInitial }) {
   function addStepAt(parent: ParentScope, index: number, type: AutomationStepType) {
     const node: BuilderStep = {
       cid: cid(),
+      id: newStepId(),
       step_type: type,
       step_config: blankConfig(type),
       branches: type === "condition" ? { yes: [], no: [] } : undefined,
@@ -673,7 +694,7 @@ export function AutomationBuilder({ initial }: { initial: BuilderInitial }) {
     setSaving(true)
     try {
       const payload = {
-        name: state.name || "Untitled automation",
+        name: state.name || t("untitled"),
         description: state.description || null,
         trigger_type: state.trigger_type,
         trigger_config: state.trigger_config,
@@ -702,7 +723,7 @@ export function AutomationBuilder({ initial }: { initial: BuilderInitial }) {
           body?.issues?.[0]
         if (firstIssue?.message) {
           toast.error(firstIssue.message, {
-            description: firstIssue.path ? `at ${firstIssue.path}` : undefined,
+            description: firstIssue.path ? t("toasts.issueAt", { path: firstIssue.path }) : undefined,
           })
         } else {
           toast.error(body?.error ?? t("toasts.saveFailed"))
@@ -861,7 +882,7 @@ function TriggerCard({
             {type === "tag_added" && (
               <div>
                 <label className="mb-1 block text-xs font-medium text-muted-foreground">
-                  Tag
+                  {t("config.tagLabel")}
                 </label>
                 <TagSelect
                   value={(config.tag_id as string) ?? ""}
@@ -876,7 +897,7 @@ function TriggerCard({
                   {t("schedule")}
                 </label>
                 <Input
-                  placeholder="Cron expression or HH:mm"
+                  placeholder={t("schedulePlaceholder")}
                   value={(config.schedule as string) ?? ""}
                   onChange={(e) =>
                     onConfigChange({ ...config, schedule: e.target.value })
@@ -1133,10 +1154,10 @@ function StepRenderer({
             </div>
             <div className="min-w-0 flex-1">
               <div className="text-[11px] uppercase tracking-wide text-muted-foreground">
-                {isCondition ? "Condition" : step.step_type === "wait" ? "Wait" : "Action"}
+                {isCondition ? t("kindCondition") : step.step_type === "wait" ? t("kindWait") : t("kindAction")}
               </div>
               <div className="truncate text-sm font-medium text-foreground">{t(`steps.${meta.label}`)}</div>
-              <div className="truncate text-[11px] text-muted-foreground">{previewFor(step)}</div>
+              <div className="truncate text-[11px] text-muted-foreground">{previewFor(step, t)}</div>
             </div>
             <ChevronDown
               className={cn("h-4 w-4 text-muted-foreground transition-transform", expanded && "rotate-180")}
@@ -1154,7 +1175,7 @@ function StepRenderer({
                     variant="ghost"
                     size="icon"
                     disabled={index === 0}
-                    aria-label="Move up"
+                    aria-label={t("moveUp")}
                     onClick={() => props.moveStepAt(path, -1)}
                   >
                     <ArrowUp className="h-4 w-4" />
@@ -1163,7 +1184,7 @@ function StepRenderer({
                     variant="ghost"
                     size="icon"
                     disabled={index === total - 1}
-                    aria-label="Move down"
+                    aria-label={t("moveDown")}
                     onClick={() => props.moveStepAt(path, 1)}
                   >
                     <ArrowDown className="h-4 w-4" />
@@ -1290,6 +1311,82 @@ function AddButton({ onPick }: { onPick: (t: AutomationStepType) => void }) {
 // Per-step config editor
 // ------------------------------------------------------------
 
+function ConditionEditor({
+  step,
+  onChange,
+}: {
+  step: BuilderStep
+  onChange: (s: BuilderStep) => void
+}) {
+  const t = useTranslations("Automations.builder")
+  const cfg = step.step_config
+  const set = (patch: Record<string, unknown>) =>
+    onChange({ ...step, step_config: editConditionConfig(cfg, patch, browserTimeZone()) })
+  const subject = (cfg.subject as string) ?? "tag_presence"
+  const timezone = (cfg.timezone as string | undefined) ?? LEGACY_CONDITION_TIMEZONE
+
+  return (
+    <>
+      <FieldBlock label={t("config.subjectLabel")}>
+        <select
+          value={subject}
+          onChange={(e) => set({ subject: e.target.value })}
+          className="w-full rounded-md border border-border bg-muted px-2 py-1.5 text-sm text-foreground"
+        >
+          <option value="tag_presence">{t("config.subjects.tag_presence")}</option>
+          <option value="contact_field">{t("config.subjects.contact_field")}</option>
+          <option value="message_content">{t("config.subjects.message_content")}</option>
+          <option value="time_of_day">{t("config.subjects.time_of_day")}</option>
+        </select>
+      </FieldBlock>
+      {subject !== "message_content" && (
+        <FieldBlock label={t("config.operandLabel")}>
+          <Input
+            placeholder={
+              subject === "time_of_day"
+                ? t("config.placeholderTime")
+                : subject === "contact_field"
+                ? t("config.placeholderContact")
+                : subject === "tag_presence"
+                ? t("config.placeholderTag")
+                : ""
+            }
+            value={(cfg.operand as string) ?? ""}
+            onChange={(e) => set({ operand: e.target.value })}
+            className="bg-muted text-foreground"
+          />
+        </FieldBlock>
+      )}
+      {subject === "time_of_day" && (
+        <FieldBlock label={t("config.timezoneLabel")}>
+          <Select value={timezone} onValueChange={(v) => v && set({ timezone: v })}>
+            <SelectTrigger className="w-full bg-muted text-foreground">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent className="max-h-72">
+              {listTimeZones(timezone).map((zone) => (
+                <SelectItem key={zone} value={zone}>
+                  {zone}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </FieldBlock>
+      )}
+      {(subject === "contact_field" || subject === "message_content") && (
+        <FieldBlock label={t("config.valueLabel")}>
+          <Input
+            value={(cfg.value as string) ?? ""}
+            onChange={(e) => set({ value: e.target.value })}
+            className="bg-muted text-foreground"
+          />
+        </FieldBlock>
+      )}
+    </>
+  )
+}
+
+
 function StepEditor({
   step,
   onChange,
@@ -1318,13 +1415,38 @@ function StepEditor({
     case "send_list":
       // The whole step_config IS the interactive payload; the shared
       // builder edits it in place (and enforces Meta's limits + preview).
+      // `wait_for_reply` rides on the step_config beside the payload. The
+      // composer rebuilds the payload from scratch when switching between
+      // buttons and list, so re-attach it on every change.
       return (
-        <InteractiveBuilder
-          value={asInteractive(cfg)}
-          onChange={(payload) =>
-            onChange({ ...step, step_config: toStepConfig(payload) })
-          }
-        />
+        <>
+          <InteractiveBuilder
+            value={asInteractive(cfg)}
+            onChange={(payload) =>
+              onChange({
+                ...step,
+                step_config: {
+                  ...toStepConfig(payload),
+                  ...(cfg.wait_for_reply ? { wait_for_reply: true } : {}),
+                },
+              })
+            }
+          />
+          <label className="flex items-start gap-2 text-xs text-foreground">
+            <input
+              type="checkbox"
+              checked={cfg.wait_for_reply === true}
+              onChange={(e) => set({ wait_for_reply: e.target.checked })}
+              className="mt-0.5 h-3.5 w-3.5 accent-primary"
+            />
+            <span>
+              {t("config.waitForReply")}
+              <span className="block text-muted-foreground">
+                {t("config.waitForReplyHint")}
+              </span>
+            </span>
+          </label>
+        </>
       )
     case "send_template":
       return (
@@ -1442,47 +1564,7 @@ function StepEditor({
         </div>
       )
     case "condition":
-      return (
-        <>
-          <FieldBlock label={t("config.subjectLabel")}>
-            <select
-              value={(cfg.subject as string) ?? "tag_presence"}
-              onChange={(e) => set({ subject: e.target.value })}
-              className="w-full rounded-md border border-border bg-muted px-2 py-1.5 text-sm text-foreground"
-            >
-              <option value="tag_presence">{t("config.subjects.tag_presence")}</option>
-              <option value="contact_field">{t("config.subjects.contact_field")}</option>
-              <option value="message_content">{t("config.subjects.message_content")}</option>
-              <option value="time_of_day">{t("config.subjects.time_of_day")}</option>
-            </select>
-          </FieldBlock>
-          <FieldBlock label={t("config.operandLabel")}>
-            <Input
-              placeholder={
-                cfg.subject === "time_of_day"
-                  ? t("config.placeholderTime")
-                  : cfg.subject === "contact_field"
-                  ? t("config.placeholderContact")
-                  : cfg.subject === "tag_presence"
-                  ? t("config.placeholderTag")
-                  : ""
-              }
-              value={(cfg.operand as string) ?? ""}
-              onChange={(e) => set({ operand: e.target.value })}
-              className="bg-muted text-foreground"
-            />
-          </FieldBlock>
-          {(cfg.subject === "contact_field" || cfg.subject === "message_content") && (
-            <FieldBlock label="Value">
-              <Input
-                value={(cfg.value as string) ?? ""}
-                onChange={(e) => set({ value: e.target.value })}
-                className="bg-muted text-foreground"
-              />
-            </FieldBlock>
-          )}
-        </>
-      )
+      return <ConditionEditor step={step} onChange={onChange} />
     case "send_webhook":
       return (
         <>
@@ -1528,21 +1610,43 @@ function FieldBlock({
   )
 }
 
-function previewFor(step: BuilderStep): string {
+function previewFor(
+  step: BuilderStep,
+  t: ReturnType<typeof useTranslations>,
+): string {
   switch (step.step_type) {
     case "send_message":
-      return (step.step_config.text as string) || "no text yet"
+      return (step.step_config.text as string) || t("preview.noText")
     case "send_buttons":
-    case "send_list":
-      return interactivePayloadPreviewText(asInteractive(step.step_config)) || "no body yet"
+    case "send_list": {
+      const preview =
+        interactivePayloadPreviewText(asInteractive(step.step_config)) || t("preview.noBody")
+      return step.step_config.wait_for_reply
+        ? t("preview.withWaitForReply", { preview })
+        : preview
+    }
     case "send_template":
-      return (step.step_config.template_name as string) || "pick a template"
-    case "wait":
-      return `${step.step_config.amount ?? "?"} ${step.step_config.unit ?? ""}`
-    case "condition":
-      return `when ${step.step_config.subject ?? "?"}`
+      return (step.step_config.template_name as string) || t("preview.pickTemplate")
+    case "wait": {
+      const unit = (step.step_config.unit as string | undefined) ?? ""
+      const unitLabel =
+        unit === "minutes" || unit === "hours" || unit === "days"
+          ? t(`preview.units.${unit}`)
+          : unit
+      return t("preview.wait", {
+        amount: String(step.step_config.amount ?? "?"),
+        unit: unitLabel,
+      })
+    }
+    case "condition": {
+      const subject = String(step.step_config.subject ?? "?")
+      const label = ["tag_presence", "contact_field", "message_content", "time_of_day"].includes(subject)
+        ? t(`config.subjects.${subject}`)
+        : subject
+      return t("preview.when", { subject: label })
+    }
     case "send_webhook":
-      return (step.step_config.url as string) || "no url"
+      return (step.step_config.url as string) || t("preview.noUrl")
     default:
       return ""
   }
@@ -1553,6 +1657,7 @@ function previewFor(step: BuilderStep): string {
 // ------------------------------------------------------------
 
 interface ApiStep {
+  id?: string
   step_type: string
   step_config: Record<string, unknown>
   branches?: { yes?: ApiStep[]; no?: ApiStep[] }
@@ -1560,6 +1665,7 @@ interface ApiStep {
 
 export function toApiSteps(steps: BuilderStep[]): ApiStep[] {
   return steps.map((s) => ({
+    ...(s.id ? { id: s.id } : {}),
     step_type: s.step_type,
     step_config: s.step_config,
     branches: s.branches
@@ -1582,6 +1688,7 @@ export interface ServerStepNode {
 export function fromServerSteps(nodes: ServerStepNode[]): BuilderStep[] {
   return nodes.map((n) => ({
     cid: cid(),
+    id: n.id,
     step_type: n.step_type as AutomationStepType,
     step_config: n.step_config ?? {},
     branches:

@@ -20,24 +20,69 @@ export function normalizePhone(phone: string): string {
 /**
  * Compare two phone numbers accounting for trunk prefix differences.
  * e.g. "370063949836" (with trunk 0) matches "37063949836" (without trunk 0)
- * by comparing the last 8 digits.
  */
 export function phonesMatch(phone1: string, phone2: string): boolean {
   const n1 = normalizePhone(phone1)
   const n2 = normalizePhone(phone2)
   if (n1 === n2) return true
-  if (n1.length >= 8 && n2.length >= 8) {
-    return n1.slice(-8) === n2.slice(-8)
-  }
-  return false
+  return isTrunkZeroVariant(n1, n2)
+}
+
+const MIN_TRUNK_MATCH_DIGITS = 8
+
+function isTrunkZeroVariant(n1: string, n2: string): boolean {
+  if (Math.abs(n1.length - n2.length) !== 1) return false
+  const [shorter, longer] = n1.length < n2.length ? [n1, n2] : [n2, n1]
+  if (shorter.length < MIN_TRUNK_MATCH_DIGITS) return false
+  return [1, 2, 3].some((ccLen) => {
+    const nationalPart = shorter.slice(ccLen)
+    if (nationalPart.startsWith('0')) return false
+    return shorter.slice(0, ccLen) + '0' + nationalPart === longer
+  })
 }
 
 /**
- * Validate phone number is E.164-like format (7-15 digits starting with non-zero).
- * Accepts with or without + prefix.
+ * Validate a *stored or inbound* phone number is E.164-like: 8–15 digits
+ * starting with a non-zero digit, optional + prefix.
+ *
+ * This is the check for digit strings we already hold — a contact row,
+ * Meta's `wa_id`, a broadcast recipient — so it accepts the digits-only
+ * form Meta uses. It cannot tell a national number from an international
+ * one ("4155551212" is a US number to the person who typed it and a Swiss
+ * one to Meta), which is why numbers entered by a person or an integrator
+ * must go through `parseInternationalPhone` instead (issue #586).
+ *
+ * The floor is 8 digits, not E.164's theoretical 7: a country code plus the
+ * shortest national numbering plans in real use is 8+, and 7 admitted most
+ * national formats. (Only a handful of tiny territories — Niue, Tokelau,
+ * Saint Helena — have 7-digit international numbers.)
  */
 export function isValidE164(phone: string): boolean {
-  return /^\+?[1-9]\d{6,14}$/.test(phone)
+  return /^\+?[1-9]\d{7,14}$/.test(phone)
+}
+
+/**
+ * Parse a phone number as typed by a person or sent by an API integrator.
+ *
+ * Requires the international `+` prefix so the country code is explicit,
+ * then returns the digits-only form Meta wants — or null. Formatting noise
+ * (spaces, dots, dashes, parentheses) between the digits is tolerated:
+ * "+1 (415) 555-1212" → "14155551212".
+ *
+ * Without the `+` requirement a national-format number passes `isValidE164`
+ * and is delivered to whichever country its leading digits happen to spell:
+ * "4155551212" (US, national) is sent as +41 55 555 12 12 (Switzerland),
+ * Meta accepts it, and the send looks successful (issue #586). Making the
+ * `+` load-bearing at every boundary where raw input enters is what the
+ * error messages ("E.164 format, e.g. +14155550123") already promised.
+ */
+export function parseInternationalPhone(raw: string | null | undefined): string | null {
+  if (!raw) return null
+  const compact = raw.trim().replace(/[\s().-]/g, '')
+  if (!compact.startsWith('+')) return null
+  const digits = compact.slice(1)
+  if (!/^\d+$/.test(digits)) return null
+  return isValidE164(digits) ? digits : null
 }
 
 /**
@@ -47,56 +92,13 @@ export function isValidE164(phone: string): boolean {
  * phone-number identifier apart from a WhatsApp-usernames BSUID (e.g.
  * "PE.1128521366369305" — letters and a dot, never matches this),
  * regardless of which digits happen to be embedded in the BSUID.
- * Shared by the inbound webhook's contact resolution and the contacts
- * UI (to badge a non-phone `phone` value instead of rendering it as
- * one) — see CLAUDE.md's "WhatsApp contact identity" section.
+ * Shared by the AI customer context, push titles and the contacts UI
+ * (to badge a non-phone `phone` value instead of rendering it as one)
+ * — see CLAUDE.md's "WhatsApp contact identity" section. Outbound
+ * addressing lives in `wa-identity.ts` (`resolveContactSendTarget`).
  */
 export function looksLikePhoneNumber(value: string): boolean {
   return /^\+?\d{5,15}$/.test(value)
-}
-
-/**
- * What to put in an outbound Meta send body: either `to` (a real
- * phone number) or `recipient` (a WhatsApp-usernames BSUID, e.g.
- * "PE.1128521366369305"). Mutually exclusive on the wire per Meta's
- * own rule — at least one required; if both are present `to` wins; omit
- * `to` entirely when sending via `recipient`. See CLAUDE.md's
- * "WhatsApp contact identity" section.
- */
-export type RecipientTarget =
-  | { type: 'phone'; value: string }
-  | { type: 'user_id'; value: string }
-
-export interface RecipientResolvable {
-  phone: string | null
-  wa_user_id?: string | null
-}
-
-/**
- * Decide how to address a contact for an outbound Meta send.
- *
- * `contacts.phone` is NOT NULL, so a hidden-number contact has a BSUID
- * string parked there as a placeholder (fails `looksLikePhoneNumber` —
- * letters + a dot never match). Real phones route via `to`; anything
- * that isn't phone-shaped, or is phone-shaped but fails E.164, falls
- * back to `wa_user_id` when we have one. Throws when neither works —
- * callers translate that into their own error shape.
- */
-export function resolveRecipientTarget(contact: RecipientResolvable): RecipientTarget {
-  if (contact.phone && looksLikePhoneNumber(contact.phone)) {
-    const sanitized = sanitizePhoneForMeta(contact.phone)
-    if (isValidE164(sanitized)) {
-      return { type: 'phone', value: sanitized }
-    }
-  }
-  if (contact.wa_user_id) {
-    return { type: 'user_id', value: contact.wa_user_id }
-  }
-  throw new Error(
-    contact.phone && looksLikePhoneNumber(contact.phone)
-      ? 'Invalid phone number format'
-      : 'Contact has no phone number or WhatsApp user id on file'
-  )
 }
 
 /**

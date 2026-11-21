@@ -1,112 +1,193 @@
-import { describe, expect, it, vi } from 'vitest'
-import type { SupabaseClient } from '@supabase/supabase-js'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { engineSendText } from './meta-send'
-
-const sendTextMessage = vi.fn(async () => ({ messageId: 'wamid.text' }))
-
-vi.mock('@/lib/whatsapp/meta-api', async (importOriginal) => ({
-  ...(await importOriginal<Record<string, unknown>>()),
-  sendTextMessage: (...args: unknown[]) =>
-    (sendTextMessage as unknown as (...a: unknown[]) => unknown)(...args),
-  sendTemplateMessage: vi.fn(),
+const state = vi.hoisted(() => ({
+  templateRows: [] as unknown[],
+  insertedMessage: null as Record<string, unknown> | null,
 }))
 
 vi.mock('@/lib/whatsapp/encryption', () => ({
   decrypt: (v: string) => v,
 }))
 
-let currentDb: SupabaseClient | null = null
 vi.mock('./admin-client', () => ({
-  supabaseAdmin: () => currentDb,
-}))
-
-interface FakeContact {
-  id: string
-  phone: string | null
-  wa_user_id?: string | null
-}
-
-interface CapturedWrites {
-  contactUpdate?: Record<string, unknown>
-}
-
-function fakeDb(contact: FakeContact | null, captured: CapturedWrites): SupabaseClient {
-  const config = { id: 'cfg-1', phone_number_id: 'pn-1', access_token: 'token' }
-  return {
+  supabaseAdmin: () => ({
     from(table: string) {
       const builder: Record<string, unknown> = {
         select: () => builder,
         eq: () => builder,
+        update: () => builder,
+        insert: (row: Record<string, unknown>) => {
+          if (table === 'messages') state.insertedMessage = row
+          return builder
+        },
         maybeSingle: async () => {
-          if (table === 'contacts') return { data: contact, error: null }
+          if (table === 'contacts') {
+            return { data: { id: 'ct-1', phone: '15551234567', wa_user_id: null }, error: null }
+          }
+          if (table === 'conversations') return { data: { id: 'cv-1' }, error: null }
           return { data: null, error: null }
         },
         single: async () => {
-          if (table === 'whatsapp_config') return { data: config, error: null }
+          if (table === 'whatsapp_config') {
+            return { data: { phone_number_id: 'pn-1', access_token: 'token' }, error: null }
+          }
           return { data: null, error: null }
         },
-        insert: () => ({ error: null }),
-        update: (row: Record<string, unknown>) => {
-          if (table === 'contacts') captured.contactUpdate = row
-          return builder
-        },
+        then: (resolve: (r: { data: unknown; error: null }) => unknown) =>
+          resolve({
+            data: table === 'message_templates' ? state.templateRows : null,
+            error: null,
+          }),
       }
       return builder
     },
-  } as unknown as SupabaseClient
+  }),
+}))
+
+import { engineSendTemplate } from './meta-send'
+
+type FetchResult = { ok: boolean; json: () => Promise<unknown> }
+
+const fetchMock = vi.fn<(url: string, init?: RequestInit) => Promise<FetchResult>>(
+  async () => ({
+    ok: true,
+    json: async () => ({ messages: [{ id: 'wamid.auto' }] }),
+  }),
+)
+
+function sentTemplate(): Record<string, unknown> {
+  expect(fetchMock).toHaveBeenCalledTimes(1)
+  const init = fetchMock.mock.calls[0][1]
+  return JSON.parse(String(init?.body)).template
 }
 
-const BASE_ARGS = {
+const BASE_ROW = {
+  id: 'tpl-1',
+  user_id: 'u-1',
+  name: 'order_update',
+  category: 'Utility',
+  language: 'en_US',
+  body_text: 'Your order {{1}} ships on {{2}}',
+  created_at: '2026-01-01T00:00:00Z',
+}
+
+const SEND_ARGS = {
   accountId: 'acct-1',
   userId: 'u-1',
   conversationId: 'cv-1',
-  text: 'hola',
+  contactId: 'ct-1',
+  templateName: 'order_update',
+  language: 'en_US',
+  params: ['A123', 'Friday'],
 }
 
-describe('engineSendText (automations)', () => {
-  it('sends via `to` and keeps phone-variant retry behavior for a real phone', async () => {
-    sendTextMessage.mockClear()
-    const captured: CapturedWrites = {}
-    currentDb = fakeDb({ id: 'ct-1', phone: '+15551234567' }, captured)
+const BODY_COMPONENT = {
+  type: 'body',
+  parameters: [
+    { type: 'text', text: 'A123' },
+    { type: 'text', text: 'Friday' },
+  ],
+}
 
-    const result = await engineSendText({ ...BASE_ARGS, contactId: 'ct-1' })
+beforeEach(() => {
+  state.templateRows = []
+  state.insertedMessage = null
+  vi.stubGlobal('fetch', fetchMock)
+})
 
-    expect(result.whatsapp_message_id).toBe('wamid.text')
-    expect(
-      (sendTextMessage.mock.calls[0] as unknown as [{ recipientTarget: unknown }])[0]
-        .recipientTarget
-    ).toEqual({ type: 'phone', value: '15551234567' })
-    expect(sendTextMessage).toHaveBeenCalledTimes(1)
-  })
+afterEach(() => {
+  vi.unstubAllGlobals()
+})
 
-  it('sends via `recipient` (wa_user_id) once, no retry loop, for a BSUID contact', async () => {
-    sendTextMessage.mockClear()
-    const captured: CapturedWrites = {}
-    currentDb = fakeDb(
-      { id: 'ct-2', phone: 'PE.1128521366369305', wa_user_id: 'PE.1128521366369305' },
-      captured
+describe('engineSendTemplate — header component', () => {
+  it.each(['image', 'video', 'document'] as const)(
+    'sends the stored %s header as a header parameter',
+    async (headerType) => {
+      state.templateRows = [
+        {
+          ...BASE_ROW,
+          header_type: headerType,
+          header_media_url: `https://cdn.example.com/header.${headerType}`,
+        },
+      ]
+
+      await engineSendTemplate(SEND_ARGS)
+
+      expect(sentTemplate()).toEqual({
+        name: 'order_update',
+        language: { code: 'en_US' },
+        components: [
+          {
+            type: 'header',
+            parameters: [
+              {
+                type: headerType,
+                [headerType]: { link: `https://cdn.example.com/header.${headerType}` },
+              },
+            ],
+          },
+          BODY_COMPONENT,
+        ],
+      })
+      expect(state.insertedMessage?.media_url).toBe(
+        `https://cdn.example.com/header.${headerType}`,
+      )
+    },
+  )
+
+  it('fails before calling Meta when a text header variable has no value', async () => {
+    state.templateRows = [
+      { ...BASE_ROW, header_type: 'text', header_content: 'Hi {{1}}' },
+    ]
+
+    await expect(engineSendTemplate(SEND_ARGS)).rejects.toThrow(
+      /Header text variable \{\{1\}\} requires a value/,
     )
-
-    const result = await engineSendText({ ...BASE_ARGS, contactId: 'ct-2' })
-
-    expect(result.whatsapp_message_id).toBe('wamid.text')
-    expect(sendTextMessage).toHaveBeenCalledTimes(1)
-    expect(
-      (sendTextMessage.mock.calls[0] as unknown as [{ recipientTarget: unknown }])[0]
-        .recipientTarget
-    ).toEqual({ type: 'user_id', value: 'PE.1128521366369305' })
-    expect(captured.contactUpdate).toBeUndefined()
+    expect(fetchMock).not.toHaveBeenCalled()
   })
 
-  it('throws before calling Meta when phone is a BSUID placeholder with no wa_user_id', async () => {
-    sendTextMessage.mockClear()
-    const captured: CapturedWrites = {}
-    currentDb = fakeDb({ id: 'ct-3', phone: 'PE.1128521366369305' }, captured)
+  it('sends no header component for a static text header', async () => {
+    state.templateRows = [
+      { ...BASE_ROW, header_type: 'text', header_content: 'Order update' },
+    ]
 
-    await expect(
-      engineSendText({ ...BASE_ARGS, contactId: 'ct-3' })
-    ).rejects.toThrow(/contact phone invalid/)
-    expect(sendTextMessage).not.toHaveBeenCalled()
+    await engineSendTemplate(SEND_ARGS)
+
+    expect(sentTemplate().components).toEqual([BODY_COMPONENT])
+  })
+})
+
+describe('engineSendTemplate — templates without a header keep their payload', () => {
+  it('sends only the body component for a header-less template', async () => {
+    state.templateRows = [BASE_ROW]
+
+    await engineSendTemplate(SEND_ARGS)
+
+    expect(sentTemplate()).toEqual({
+      name: 'order_update',
+      language: { code: 'en_US' },
+      components: [BODY_COMPONENT],
+    })
+  })
+
+  it('sends no components for a fully static template', async () => {
+    state.templateRows = [{ ...BASE_ROW, body_text: 'Thanks for your order' }]
+
+    await engineSendTemplate({ ...SEND_ARGS, params: [] })
+
+    expect(sentTemplate()).toEqual({
+      name: 'order_update',
+      language: { code: 'en_US' },
+    })
+  })
+
+  it('falls back to the body-only payload when the account has no local row', async () => {
+    await engineSendTemplate(SEND_ARGS)
+
+    expect(sentTemplate()).toEqual({
+      name: 'order_update',
+      language: { code: 'en_US' },
+      components: [BODY_COMPONENT],
+    })
   })
 })

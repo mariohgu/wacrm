@@ -35,6 +35,8 @@ export type AiReplyReason =
   | 'no_context'
   | 'account_rate_limited'
   | 'cap_race'
+  | 'superseded'
+  | 'taken_over'
   // failed
   | 'config_error'
   | 'provider_error'
@@ -53,6 +55,8 @@ export const AI_REPLY_REASONS: readonly AiReplyReason[] = [
   'no_context',
   'account_rate_limited',
   'cap_race',
+  'superseded',
+  'taken_over',
   'config_error',
   'provider_error',
   'claim_error',

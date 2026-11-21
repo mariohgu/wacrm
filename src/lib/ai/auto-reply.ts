@@ -15,7 +15,11 @@ import {
   type AiReplyReason,
 } from './reply-events'
 import type { AiConfig } from './types'
-import { engineSendText } from '@/lib/flows/meta-send'
+import {
+  engineSendText,
+  loadAccountMetaCredentials,
+} from '@/lib/flows/meta-send'
+import { sendTypingIndicator } from '@/lib/whatsapp/meta-api'
 import { checkRateLimit, RATE_LIMITS } from '@/lib/rate-limit'
 
 interface DispatchArgs {
@@ -26,11 +30,21 @@ interface DispatchArgs {
   /** The account's WhatsApp config owner, used for the outbound send's
    *  audit columns (mirrors how the flow runner passes it through). */
   configOwnerUserId: string
-  /** The inbound `messages.id` that triggered this attempt — recorded on
-   *  the `ai_reply_events` row so the inbox can point at the exact
-   *  customer message the bot did (or didn't) answer. Optional so older
-   *  callers/tests still compile. */
-  inboundMessageId?: string | null
+  /** The inbound `messages.id` (internal UUID) that triggered this
+   *  attempt — recorded on the `ai_reply_events` row so the inbox can
+   *  point at the exact customer message the bot did (or didn't) answer.
+   *  Optional so older callers/tests still compile. */
+  inboundMessageRowId?: string | null
+  /** Meta's wamid of that same customer message. When set, a typing
+   *  indicator (which also marks it read) is shown while the reply is
+   *  generated, and a reply is dropped if a newer customer message has
+   *  arrived in the meantime.
+   *
+   *  NOT interchangeable with `inboundMessageRowId`: both are strings,
+   *  so the compiler cannot catch a swap. A UUID passed here makes
+   *  every attempt look superseded (the bot never replies); a wamid
+   *  passed there breaks the `ai_reply_events.message_id` foreign key. */
+  inboundWamid?: string | null
 }
 
 /** What one auto-reply attempt ended up doing — persisted to
@@ -64,6 +78,8 @@ const attempt = (
  *   - the per-conversation reply cap is reached
  *   - there's nothing to reply to
  *   - the account-wide burst limit is hit
+ *   - a newer customer message arrived while the reply was generated
+ *   - a human took the thread over while the reply was generated
  *
  * Every attempt past the account-level gate — replied, handed off,
  * skipped for one of the reasons above, or failed — writes one row to
@@ -102,7 +118,7 @@ export async function dispatchInboundToAiReply(
   await logAiReplyEvent(db, {
     accountId: args.accountId,
     conversationId: args.conversationId,
-    messageId: args.inboundMessageId ?? null,
+    messageId: args.inboundMessageRowId ?? null,
     outcome: result.outcome,
     reason: result.reason,
     detail: result.detail ?? null,
@@ -123,7 +139,13 @@ async function runAutoReply(
   db: SupabaseClient,
   args: DispatchArgs,
 ): Promise<AutoReplyAttempt | null> {
-  const { accountId, conversationId, contactId, configOwnerUserId } = args
+  const {
+    accountId,
+    conversationId,
+    contactId,
+    configOwnerUserId,
+    inboundWamid,
+  } = args
 
   let config: AiConfig | null
   try {
@@ -198,6 +220,16 @@ async function runAutoReply(
       `[ai auto-reply] account ${accountId} hit the per-account rate limit — skipping this inbound.`,
     )
     return attempt('skipped', 'account_rate_limited')
+  }
+
+  // Every gate has passed — we're committed to attempting a reply, so
+  // show the customer "typing…" (and mark their message read) while the
+  // retrieval + LLM round trips run. Meta clears the indicator after
+  // 25 s or when our reply lands, whichever is first, so there's
+  // nothing to undo on the handoff / no-text path. Strictly
+  // best-effort: a failed indicator must never cost us the reply.
+  if (inboundWamid) {
+    await showTypingIndicator(db, accountId, inboundWamid)
   }
 
   // Ground the reply in the account's knowledge base (best-effort).
@@ -286,16 +318,23 @@ async function runAutoReply(
       messages,
       replyCount: conv.ai_reply_count ?? 0,
     })
-    const update: Record<string, unknown> = {
-      ai_autoreply_disabled: true,
-      ai_handoff_summary: summary,
-    }
+    await db
+      .from('conversations')
+      .update({ ai_autoreply_disabled: true, ai_handoff_summary: summary })
+      .eq('id', conversationId)
     // Only set the assignee when a target is configured AND the thread
     // isn't already owned — never stomp an existing human assignment.
-    if (config.handoffAgentId && !conv.assigned_agent_id) {
-      update.assigned_agent_id = config.handoffAgentId
+    // A separate, guarded UPDATE (`assigned_agent_id IS NULL`) rather
+    // than a field on the one above: the `conv` read at the top can be
+    // seconds stale by now, and an agent may have picked the thread up
+    // while the model was generating.
+    if (config.handoffAgentId) {
+      await db
+        .from('conversations')
+        .update({ assigned_agent_id: config.handoffAgentId })
+        .eq('id', conversationId)
+        .is('assigned_agent_id', null)
     }
-    await db.from('conversations').update(update).eq('id', conversationId)
 
     return attempt(
       'handoff',
@@ -306,6 +345,13 @@ async function runAutoReply(
           ? 'farewell sent'
           : 'no farewell message',
     )
+  }
+
+  // The customer wrote again while this reply was being generated: the
+  // newer message has its own attempt, with the full context. Sending
+  // this one too would answer a question they have already moved past.
+  if (inboundWamid && (await hasNewerInbound(db, conversationId, inboundWamid))) {
+    return attempt('skipped', 'superseded')
   }
 
   // Atomically claim a reply slot: the cap check + increment happen in
@@ -329,6 +375,19 @@ async function runAutoReply(
     return attempt('failed', 'claim_error', describeError(claimErr))
   }
   if (claimed !== true) {
+    // Since migration 053 the claim also refuses when the conversation
+    // was paused or assigned to a person after the early read above —
+    // i.e. a human took the thread over mid-generation. That is a very
+    // different story from "the cap was hit" for whoever reads the
+    // banner or gets the push, so tell the two apart.
+    const { data: now } = await db
+      .from('conversations')
+      .select('assigned_agent_id, ai_autoreply_disabled')
+      .eq('id', conversationId)
+      .maybeSingle()
+    if (now && (now.assigned_agent_id || now.ai_autoreply_disabled)) {
+      return attempt('skipped', 'taken_over')
+    }
     // Lost the per-conversation cap race (or the cap was reached between
     // the early read above and this claim).
     return attempt('skipped', 'cap_race')
@@ -351,4 +410,49 @@ async function runAutoReply(
   }
 
   return attempt('replied', 'sent')
+}
+
+/**
+ * True when the most recent customer message in the conversation is not
+ * the one this attempt is answering.
+ */
+async function hasNewerInbound(
+  db: SupabaseClient,
+  conversationId: string,
+  inboundWamid: string,
+): Promise<boolean> {
+  const { data, error } = await db
+    .from('messages')
+    .select('message_id')
+    .eq('conversation_id', conversationId)
+    .eq('sender_type', 'customer')
+    .order('created_at', { ascending: false })
+    .limit(1)
+  if (error || !data || data.length === 0) return false
+  return data[0].message_id !== inboundWamid
+}
+
+/**
+ * Best-effort "typing…" for the inbound we're about to answer. Swallows
+ * every failure (no WhatsApp config, bad token, Meta 4xx) with a warning
+ * — the indicator is cosmetic, the reply is not.
+ */
+async function showTypingIndicator(
+  db: SupabaseClient,
+  accountId: string,
+  inboundWamid: string,
+): Promise<void> {
+  try {
+    const { phoneNumberId, accessToken } = await loadAccountMetaCredentials(
+      db,
+      accountId,
+    )
+    await sendTypingIndicator({
+      phoneNumberId,
+      accessToken,
+      messageId: inboundWamid,
+    })
+  } catch (err) {
+    console.warn('[ai auto-reply] typing indicator failed (continuing):', err)
+  }
 }

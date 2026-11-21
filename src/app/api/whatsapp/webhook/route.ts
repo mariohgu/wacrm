@@ -5,25 +5,46 @@ import { getMediaUrl, downloadMedia } from '@/lib/whatsapp/meta-api'
 import { mirrorInboundMedia } from '@/lib/whatsapp/mirror-inbound-media'
 import { loadTranscriptionEndpoint } from '@/lib/ai/config'
 import { transcribeAudio } from '@/lib/ai/transcription'
-import { normalizePhone, looksLikePhoneNumber } from '@/lib/whatsapp/phone-utils'
+import { normalizePhone, phonesMatch } from '@/lib/whatsapp/phone-utils'
+import {
+  hasUsableIdentity,
+  identityDisplayName,
+  isBusinessScopedUserId,
+  resolveInboundIdentity,
+  type WaContactPayload,
+  type WaIdentity,
+} from '@/lib/whatsapp/wa-identity'
+import { getT } from '@/lib/i18n/translate'
 import { findExistingContact, isUniqueViolation } from '@/lib/contacts/dedupe'
 import { reopenClosedConversation } from '@/lib/conversations/reopen'
-import { verifyMetaWebhookSignature } from '@/lib/whatsapp/webhook-signature'
-import { runAutomationsForTrigger } from '@/lib/automations/engine'
+import { claimFirstInboundMessage } from '@/lib/conversations/first-inbound'
+import {
+  verifyMetaWebhookSignature,
+  verifyTokenMatches,
+} from '@/lib/whatsapp/webhook-signature'
+import { readCappedBody } from '@/lib/whatsapp/webhook-body'
+import { resumeAwaitingReply, runAutomationsForTrigger } from '@/lib/automations/engine'
 import { dispatchInboundToFlows } from '@/lib/flows/engine'
 import { dispatchInboundToAiReply, type AutoReplyAttempt } from '@/lib/ai/auto-reply'
 import { classifyInbound, notifyInboundMessage } from '@/lib/push/inbound'
 import { dispatchWebhookEvent } from '@/lib/webhooks/deliver'
 import {
+  applyBroadcastRecipientStatus,
+  flagBroadcastReply,
+} from '@/lib/whatsapp/broadcast-recipient-webhook'
+import {
   handleTemplateWebhookChange,
   isTemplateWebhookField,
 } from '@/lib/whatsapp/template-webhook'
+import { applyMessageStatus } from '@/lib/whatsapp/message-status-sync'
 
 // The `after()` callback in POST runs within this route's max duration.
 // Inbound processing can fan out to per-media Meta verification calls, so
 // give it headroom beyond the platform default (Vercel clamps this to the
 // plan's ceiling). Tune as needed.
 export const maxDuration = 60
+
+const t = getT('Api')
 
 // Lazy-initialized to avoid build-time crash when env vars are missing
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -40,14 +61,18 @@ function supabaseAdmin() {
 
 interface WhatsAppMessage {
   id: string
-  /** Absent when the sender has hidden their phone number ("WhatsApp
-   *  usernames") — see `from_user_id` below and CLAUDE.md's "WhatsApp
-   *  contact identity" section. */
+  /**
+   * Sender's phone number. **Optional since Meta's username rollout** —
+   * a sender who has adopted a WhatsApp username and has no recent
+   * interaction history with this business arrives with no phone number
+   * at all, identified only by `from_user_id` (issue #519). See
+   * `@/lib/whatsapp/wa-identity`.
+   */
   from?: string
-  /** Present instead of `from` for a hidden-number sender. A
-   *  Business-Scoped User ID, format "CC.digits" (e.g.
-   *  "PE.1128521366369305") — opaque, not a phone number. */
+  /** Sender's business-scoped user ID (BSUID). */
   from_user_id?: string
+  /** Sender's portfolio-level BSUID. */
+  from_parent_user_id?: string
   timestamp: string
   type: string
   text?: { body: string }
@@ -80,6 +105,28 @@ interface WhatsAppMessage {
   button?: { text?: string; payload?: string }
   /** Present when the customer swipe-replies to one of our messages. */
   context?: { id: string }
+  /**
+   * Why Meta could not hand this message over. Set on a `type:
+   * 'unsupported'` delivery — a view-once photo, a poll, a disappearing
+   * message, or anything sent from an old or unofficial WhatsApp build.
+   * The content is NOT included on such a delivery and cannot be fetched
+   * afterwards, so this reason is the only thing there is to keep.
+   */
+  errors?: MetaError[]
+}
+
+/**
+ * One entry of an `errors` array, as Meta sends it. Appears on a failed
+ * *status* (why our outbound message bounced) and on an inbound *message*
+ * Meta could not hand over — a `type: 'unsupported'` delivery carries the
+ * reason here and no content at all.
+ */
+interface MetaError {
+  code: number
+  title: string
+  message?: string
+  error_data?: { details?: string }
+  href?: string
 }
 
 interface WhatsAppWebhookEntry {
@@ -92,18 +139,11 @@ interface WhatsAppWebhookEntry {
         phone_number_id: string
       }
       contacts?: Array<{
-        profile: {
-          name: string
-          /** Plain-ASCII @handle, present when the customer has set a
-           *  WhatsApp username. Prefer this over `name`, which can be a
-           *  decorative Unicode string for such customers. */
-          username?: string
-        }
-        /** Absent for a hidden-number contact — see `user_id`. */
+        profile: { name?: string; username?: string }
+        /** Absent for a username-only sender — see WhatsAppMessage.from. */
         wa_id?: string
-        /** Mirrors the message's `from_user_id` for a hidden-number
-         *  contact — same BSUID, format "CC.digits". */
         user_id?: string
+        parent_user_id?: string
       }>
       messages?: WhatsAppMessage[]
       statuses?: Array<{
@@ -111,6 +151,13 @@ interface WhatsAppWebhookEntry {
         status: string
         timestamp: string
         recipient_id: string
+        /**
+         * Only present when `status === 'failed'`. Meta's reason for the
+         * failure — `code` is a stable numeric error code (e.g. 131049),
+         * `title` a short label, `error_data.details` the human-readable
+         * explanation. See #535.
+         */
+        errors?: MetaError[]
       }>
     }
     field: string
@@ -153,7 +200,7 @@ export async function GET(request: Request) {
     for (const config of configs) {
       if (!config.verify_token) continue
       try {
-        if (decrypt(config.verify_token) === verifyToken) {
+        if (verifyTokenMatches(decrypt(config.verify_token), verifyToken)) {
           matchedConfig = config
           break
         }
@@ -203,7 +250,11 @@ export async function GET(request: Request) {
 export async function POST(request: Request) {
   // Read raw body first so we can HMAC-verify the exact bytes Meta
   // signed. request.json() would re-encode and break the signature.
-  const rawBody = await request.text()
+  const rawBody = await readCappedBody(request)
+  if (rawBody === null) {
+    console.warn('[webhook] rejected oversized payload')
+    return NextResponse.json({ error: 'Payload too large' }, { status: 413 })
+  }
   const signature = request.headers.get('x-hub-signature-256')
 
   if (!verifyMetaWebhookSignature(rawBody, signature)) {
@@ -246,6 +297,33 @@ export async function POST(request: Request) {
   return NextResponse.json({ status: 'received' }, { status: 200 })
 }
 
+async function resolveAccountForPhoneNumber(
+  phoneNumberId: string | undefined
+): Promise<string | null> {
+  if (!phoneNumberId) return null
+  const { data, error } = await supabaseAdmin()
+    .from('whatsapp_config')
+    .select('account_id')
+    .eq('phone_number_id', phoneNumberId)
+
+  if (error) {
+    console.error('Error resolving account for status update:', phoneNumberId, error)
+    return null
+  }
+  if (!data || data.length !== 1) {
+    console.error(
+      `Status update for phone_number_id ${phoneNumberId} matched ${data?.length ?? 0} configs; message statuses skipped`
+    )
+    return null
+  }
+  return data[0].account_id
+}
+
+function metaTimestampToIso(timestamp: string): string | null {
+  const seconds = Number.parseInt(timestamp, 10)
+  return Number.isFinite(seconds) ? new Date(seconds * 1000).toISOString() : null
+}
+
 async function processWebhook(body: { entry?: WhatsAppWebhookEntry[] }) {
   if (!body.entry) return
 
@@ -256,9 +334,16 @@ async function processWebhook(body: { entry?: WhatsAppWebhookEntry[] }) {
       // have a different value shape — route them through the
       // dedicated handler. Skip the messaging branches below so we
       // don't try to read message-shaped fields off a template event.
+      // `entry.id` is the WABA id for template events — the handler
+      // needs it to resolve the owning account when the template has
+      // no local row yet (#534).
       if (isTemplateWebhookField(change.field)) {
         await handleTemplateWebhookChange(
-          { field: change.field, value: change.value as unknown },
+          {
+            field: change.field,
+            value: change.value as unknown,
+            wabaId: entry.id,
+          },
           supabaseAdmin(),
         )
         continue
@@ -268,8 +353,11 @@ async function processWebhook(body: { entry?: WhatsAppWebhookEntry[] }) {
 
       // Handle status updates
       if (value.statuses) {
+        const statusAccountId = await resolveAccountForPhoneNumber(
+          value.metadata?.phone_number_id
+        )
         for (const status of value.statuses) {
-          await handleStatusUpdate(status)
+          await handleStatusUpdate(status, statusAccountId)
         }
       }
 
@@ -342,67 +430,43 @@ async function processWebhook(body: { entry?: WhatsAppWebhookEntry[] }) {
   }
 }
 
-// The happy-path status ladder — pending → sent → delivered → read →
-// replied. Webhook replays must never regress a recipient back down
-// this ladder.
-//
-// `failed` is NOT on this ladder. It's a terminal side branch that is
-// only valid from the early states (pending / sent) — once Meta has
-// delivered or the user has read or replied, a later "failed" status
-// event is a bug in Meta's pipeline or a spoof attempt and must be
-// ignored.
-const RECIPIENT_STATUS_LADDER = [
-  'pending',
-  'sent',
-  'delivered',
-  'read',
-  'replied',
-] as const
+async function handleStatusUpdate(
+  status: {
+    id: string
+    status: string
+    timestamp: string
+    recipient_id: string
+    errors?: MetaError[]
+  },
+  accountId: string | null
+) {
+  // Meta's reason for a failed send (#535). Only read on `failed`; a
+  // later non-failed status for the same wamid leaves the error
+  // columns alone rather than clearing them, so the reason survives.
+  const failure =
+    status.status === 'failed' && status.errors?.[0]
+      ? {
+          code: status.errors[0].code,
+          title: status.errors[0].title,
+          details: status.errors[0].error_data?.details ?? null,
+        }
+      : null
 
-function ladderLevel(s: string): number {
-  const idx = (RECIPIENT_STATUS_LADDER as readonly string[]).indexOf(s)
-  return idx < 0 ? -1 : idx
-}
-
-/**
- * Can a recipient transition from `current` to `incoming`?
- *   - Along the ladder, only forward moves are allowed.
- *   - `failed` is accepted only from `pending` or `sent`; it's refused
- *     once the recipient has reached any of the success states.
- */
-function isValidStatusTransition(current: string, incoming: string): boolean {
-  if (incoming === 'failed') {
-    return current === 'pending' || current === 'sent'
+  if (failure) {
+    console.warn(
+      `WhatsApp message ${status.id} failed: [${failure.code}] ${failure.title}` +
+        (failure.details ? ` — ${failure.details}` : '')
+    )
   }
-  if (current === 'failed') {
-    return false // failed is terminal
-  }
-  const ci = ladderLevel(current)
-  const ii = ladderLevel(incoming)
-  if (ii < 0) return false // unknown incoming status
-  if (ci < 0) return true // unknown current — accept anything on the ladder
-  return ii > ci
-}
 
-async function handleStatusUpdate(status: {
-  id: string
-  status: string
-  timestamp: string
-  recipient_id: string
-}) {
-  // 1) Mirror onto messages (legacy behavior) — Meta's status values
-  //    already match the CHECK constraint on messages.status. No
-  //    `.select()`: message_id is NOT unique (migration 009 — Meta ids
-  //    repeat across numbers), so this updates 0..N rows and must not
-  //    assume a single row.
-  const { error: msgErr } = await supabaseAdmin()
-    .from('messages')
-    .update({ status: status.status })
-    .eq('message_id', status.id)
-
-  if (msgErr) {
-    console.error('Error updating message status:', msgErr)
-  }
+  const advancedMessages = accountId
+    ? await applyMessageStatus(supabaseAdmin(), accountId, {
+        wamid: status.id,
+        status: status.status,
+        failure,
+        statusAt: metaTimestampToIso(status.timestamp),
+      })
+    : []
 
   // Webhook fan-out for this status change happens at the END of this
   // handler (after the broadcast mirror below), so a slow subscriber
@@ -412,100 +476,40 @@ async function handleStatusUpdate(status: {
   //    (added in migration 003). The aggregate trigger on
   //    broadcast_recipients re-derives the parent broadcast's
   //    sent/delivered/read/failed counts automatically.
-  const tsIso = new Date(parseInt(status.timestamp) * 1000).toISOString()
-
-  const { data: recipient, error: recFetchErr } = await supabaseAdmin()
-    .from('broadcast_recipients')
-    .select('id, status')
-    .eq('whatsapp_message_id', status.id)
-    .maybeSingle()
-
-  if (recFetchErr) {
-    console.error('Error fetching broadcast recipient:', recFetchErr)
-  } else if (
-    recipient &&
-    // Guard transitions — forward-only on the success ladder, and
-    // `failed` only from pre-delivered states.
-    isValidStatusTransition(recipient.status, status.status)
-  ) {
-    const update: Record<string, unknown> = { status: status.status }
-    if (status.status === 'sent' && !('sent_at' in update)) update.sent_at = tsIso
-    if (status.status === 'delivered') update.delivered_at = tsIso
-    if (status.status === 'read') update.read_at = tsIso
-
-    const { error: recUpdateErr } = await supabaseAdmin()
-      .from('broadcast_recipients')
-      .update(update)
-      .eq('id', recipient.id)
-
-    if (recUpdateErr) {
-      console.error('Error updating broadcast recipient status:', recUpdateErr)
-    }
-  }
+  await applyBroadcastRecipientStatus(supabaseAdmin(), {
+    whatsappMessageId: status.id,
+    status: status.status,
+    occurredAt: new Date(parseInt(status.timestamp) * 1000).toISOString(),
+    failure,
+  })
 
   // 3) Webhook fan-out for messages we store (inbox / API sends).
   //    Runs last so a slow subscriber can't delay the mirrors above.
-  //    Bounded to one row (message_id isn't unique) purely to resolve
-  //    the owning account for delivery.
-  const { data: msgRow } = await supabaseAdmin()
-    .from('messages')
-    .select('conversation_id, conversations(account_id)')
-    .eq('message_id', status.id)
-    .limit(1)
-    .maybeSingle()
-
-  if (msgRow) {
-    const conv = msgRow.conversations as { account_id: string } | null
-    const accountId = conv?.account_id
-    if (accountId) {
-      await dispatchWebhookEvent(
-        supabaseAdmin(),
-        accountId,
-        'message.status_updated',
-        {
-          whatsapp_message_id: status.id,
-          conversation_id: msgRow.conversation_id,
-          status: status.status,
-        }
-      )
-    }
+  if (!accountId) return
+  for (const advanced of advancedMessages) {
+    await dispatchWebhookEvent(
+      supabaseAdmin(),
+      accountId,
+      'message.status_updated',
+      {
+        whatsapp_message_id: status.id,
+        conversation_id: advanced.conversation_id,
+        status: status.status,
+      }
+    )
   }
 }
 
 /**
- * If an inbound message's sender is on a still-unreplied
- * broadcast_recipients row, flip it to `replied` so the reply count
- * advances on the parent broadcast.
+ * Flip the contact's most recent broadcast recipient row to `replied`
+ * when it was sent within the reply window and isn't already replied.
  *
  * Runs on a best-effort basis — failures here must not break the
  * main inbound-message flow, so errors are swallowed with a log.
  */
 async function flagBroadcastReplyIfAny(accountId: string, contactId: string) {
   try {
-    // Most recent outbound broadcast in this account that hasn't
-    // been replied to yet. Account-scoped so a shared inbox reply
-    // marks the broadcast as replied regardless of which teammate
-    // sent it.
-    const { data: recs, error } = await supabaseAdmin()
-      .from('broadcast_recipients')
-      .select('id, status, broadcast_id, broadcasts!inner(account_id)')
-      .eq('contact_id', contactId)
-      .eq('broadcasts.account_id', accountId)
-      .in('status', ['sent', 'delivered', 'read'])
-      .order('created_at', { ascending: false })
-      .limit(1)
-
-    if (error || !recs || recs.length === 0) return
-
-    const row = recs[0]
-    const { error: updErr } = await supabaseAdmin()
-      .from('broadcast_recipients')
-      .update({ status: 'replied', replied_at: new Date().toISOString() })
-      .eq('id', row.id)
-
-    if (updErr) {
-      console.error('Error marking broadcast recipient replied:', updErr)
-    }
+    await flagBroadcastReply(supabaseAdmin(), accountId, contactId)
   } catch (err) {
     console.error('flagBroadcastReplyIfAny failed:', err)
   }
@@ -594,11 +598,7 @@ async function handleReaction(
 
 async function processMessage(
   message: WhatsAppMessage,
-  contact: {
-    profile: { name: string; username?: string }
-    wa_id?: string
-    user_id?: string
-  },
+  contact: WaContactPayload | undefined,
   // Tenancy. Resolved from the matched whatsapp_config row; every
   // contact / conversation / message row created downstream is
   // stamped with this so any member of the account can see it.
@@ -612,41 +612,25 @@ async function processMessage(
   // See parseMessageContent for what it turns off.
   mirrorMedia: boolean
 ) {
-  // Precedence: a normal delivery carries `message.from` (digits). A
-  // hidden-number delivery ("WhatsApp usernames") omits it and carries
-  // the BSUID in `message.from_user_id` instead, mirrored on the
-  // contact object as `contact.user_id` — confirmed against a real
-  // payload from an affected account. See CLAUDE.md's "WhatsApp contact
-  // identity" section.
-  const rawSenderId = message.from ?? message.from_user_id ?? contact.user_id ?? ''
-  const senderPhone = normalizePhone(rawSenderId)
-  // `profile.username` is the plain-ASCII @handle; `profile.name` can be
-  // a decorative Unicode string (stylized alphanumeric symbols) for a
-  // username-having customer, which renders as garbled boxes in the
-  // inbox — prefer username when Meta supplies one.
-  const contactName = contact.profile.username || contact.profile.name
-  // The BSUID (`rawSenderId`) can rotate over time — it's a routing
-  // token, not a stable identity (see CLAUDE.md). `profile.username` is
-  // the durable signal, so it takes priority in findOrCreateContact
-  // regardless of whether this particular delivery also has a real
-  // phone number.
-  const waUsername = contact.profile.username ?? null
-  // The actual BSUID, independent of whether a real phone was ALSO
-  // present on this delivery. Kept separate from `rawSenderId` (which
-  // resolves to the phone when one is present, per Meta's own `to`-
-  // takes-precedence-over-`recipient` rule) so `wa_user_id` never ends
-  // up holding a phone number — it's meant purely as a routing token.
-  const waUserId = message.from_user_id ?? contact.user_id ?? null
+  // Phone number OR business-scoped user ID — Meta sends only the
+  // latter for a sender who has adopted a WhatsApp username (#519).
+  const identity = resolveInboundIdentity(message, contact)
+  if (!hasUsableIdentity(identity)) {
+    // Neither key present. Creating a row anyway would mean an
+    // unreachable contact that can never be matched again, so drop the
+    // delivery loudly instead of silently accumulating them.
+    console.error(
+      '[webhook] inbound message carries neither a phone number nor a BSUID; skipping:',
+      message.id
+    )
+    return
+  }
 
   // Find or create contact
   const contactOutcome = await findOrCreateContact(
     accountId,
     configOwnerUserId,
-    senderPhone,
-    contactName,
-    rawSenderId,
-    waUsername,
-    waUserId
+    identity
   )
   if (!contactOutcome) return
   const contactRecord = contactOutcome.contact
@@ -680,13 +664,20 @@ async function processMessage(
   }
 
   // Parse message content based on type
-  const { contentText, mediaUrl, mediaType, interactiveReplyId } =
-    await parseMessageContent(
-      message,
-      accessToken,
-      accountId,
-      mirrorMedia ? { accountId } : null
-    )
+  const {
+    contentText,
+    mediaUrl,
+    mediaType,
+    interactiveReplyId,
+    errorCode,
+    errorTitle,
+    errorDetails,
+  } = await parseMessageContent(
+    message,
+    accessToken,
+    accountId,
+    mirrorMedia ? { accountId } : null
+  )
 
   // Resolve swipe-reply context if present. A missing parent is fine —
   // we just store NULL and the UI renders the message without a quote.
@@ -727,16 +718,7 @@ async function processMessage(
         ? 'interactive' // template quick-reply tap (issue #478)
         : 'text'        // reaction, unknown → text fallback
 
-  // Determine whether this is the contact's very first inbound message
-  // BEFORE we insert, so the count is accurate. Covers the case where
-  // the contact row already exists (manual add / CSV import) but they've
-  // never messaged us before — which new_contact_created wouldn't catch.
-  const { count: priorCustomerMsgCount } = await supabaseAdmin()
-    .from('messages')
-    .select('id', { count: 'exact', head: true })
-    .eq('conversation_id', conversation.id)
-    .eq('sender_type', 'customer')
-  const isFirstInboundMessage = (priorCustomerMsgCount ?? 0) === 0
+  const receivedAt = new Date(parseInt(message.timestamp) * 1000).toISOString()
 
   // Idempotent insert. Meta retries webhook deliveries (a slow ack, a
   // transient 5xx), and each retry replays the exact same message.id. The
@@ -762,12 +744,20 @@ async function processMessage(
         media_type: mediaType,
         message_id: message.id,
         status: 'delivered',
-        created_at: new Date(parseInt(message.timestamp) * 1000).toISOString(),
+        created_at: receivedAt,
         reply_to_message_id: replyToInternalId,
         // Only populated for content_type='interactive'. Migration 010 added
         // the column; null for every other content_type so existing inserts
         // behave identically.
         interactive_reply_id: interactiveReplyId,
+        // Non-null only for a `type: 'unsupported'` delivery, where they
+        // hold Meta's reason. Inbound rows are never status='failed', so
+        // the thread's delivery-failure banner (which gates on that) is
+        // unaffected; these are here so the reason survives and can be
+        // queried.
+        error_code: errorCode,
+        error_title: errorTitle,
+        error_details: errorDetails,
       },
       { onConflict: 'conversation_id,message_id', ignoreDuplicates: true }
     )
@@ -789,6 +779,12 @@ async function processMessage(
     )
     return
   }
+
+  const isFirstInboundMessage = await claimFirstInboundMessage(
+    supabaseAdmin(),
+    conversation,
+    receivedAt
+  )
 
   // Update conversation. The unread bump is done DB-side (migration 037's
   // bump_conversation_on_inbound) rather than as a read-modify-write of the
@@ -867,6 +863,28 @@ async function processMessage(
   // Fire-and-forget: a slow or failing automation must not block the
   // webhook's 200 OK response to Meta.
   const inboundText = contentText ?? message.text?.body ?? ''
+
+  // An automation parked at a "wait for reply" Send Buttons / Send List
+  // step takes this message as its reply — a tap or typed text — and
+  // continues from the step after the send. Like a Flow consuming the
+  // message, that suppresses the content-level triggers and AI reply
+  // below so the customer doesn't get a second bot answering. Runs
+  // BEFORE the trigger dispatch so the message that parks a run can
+  // never also resume it. Flows still win: only checked if no flow
+  // consumed the message. Never throws.
+  const automationConsumed = flowConsumed
+    ? false
+    : await resumeAwaitingReply({
+        accountId,
+        contactId: contactRecord.id,
+        context: {
+          message_text: inboundText,
+          conversation_id: conversation.id,
+          interactive_reply_id: interactiveReplyId ?? undefined,
+        },
+      })
+  const contentConsumed = flowConsumed || automationConsumed
+
   const automationTriggers: (
     | 'new_contact_created'
     | 'first_inbound_message'
@@ -874,9 +892,9 @@ async function processMessage(
     | 'keyword_match'
     | 'interactive_reply'
   )[] = []
-  // Content-level triggers are suppressed when a flow consumed the
-  // message — see the comment block above.
-  if (!flowConsumed) {
+  // Content-level triggers are suppressed when a flow or a waiting
+  // automation consumed the message — see the comment blocks above.
+  if (!contentConsumed) {
     automationTriggers.push('new_message_received', 'keyword_match')
     // Interactive tap → fire the interactive_reply trigger too (only
     // meaningful when a button/list reply actually arrived). Enables
@@ -923,15 +941,20 @@ async function processMessage(
   // the webhook dispatch below); `dispatchInboundToAiReply` owns its
   // eligibility gates + try/catch and never throws.
   let aiAttempt: AutoReplyAttempt | null | undefined
-  if (!flowConsumed && !interactiveReplyId && inboundText.trim()) {
+  if (!contentConsumed && !interactiveReplyId && inboundText.trim()) {
     aiAttempt = await dispatchInboundToAiReply({
       accountId,
       conversationId: conversation.id,
       contactId: contactRecord.id,
       configOwnerUserId,
-      // Recorded on the `ai_reply_events` row so the inbox can point at
+      // Internal `messages.id` (UUID) of the row just inserted —
+      // recorded on the `ai_reply_events` row so the inbox can point at
       // the exact customer message the bot did (or didn't) answer.
-      inboundMessageId: insertedRows[0]?.id ?? null,
+      inboundMessageRowId: insertedRows[0]?.id ?? null,
+      // Meta's message id (wamid). Lets the bot show "typing…" (and
+      // mark the message read) while the reply is generated, and detect
+      // that a newer customer message has superseded this one.
+      inboundWamid: message.id,
     })
   }
 
@@ -948,7 +971,9 @@ async function processMessage(
     contactId: contactRecord.id,
     previewText: inboundText,
     classification: classifyInbound({
-      flowConsumed: !!flowConsumed,
+      // A Flow OR a parked automation that this reply resumed — either
+      // way an automated responder owns the message.
+      flowConsumed: !!contentConsumed,
       interactiveReplyId: interactiveReplyId ?? null,
       hasText: inboundText.trim().length > 0,
       aiAttempt,
@@ -994,6 +1019,16 @@ async function parseMessageContent(
    * tap with the right affordance. Null for everything else.
    */
   interactiveReplyId: string | null
+  /**
+   * Meta's account of a message it could not hand over, from the
+   * `errors[0]` on a `type: 'unsupported'` delivery. All three are null
+   * for every type we understand. Persisted to `messages.error_code` /
+   * `error_title` / `error_details` — the columns migration 042 added for
+   * failed outbound statuses, which hold the same shape of data.
+   */
+  errorCode: number | null
+  errorTitle: string | null
+  errorDetails: string | null
 }> {
   // getMediaUrl signature is (mediaId, accessToken) — earlier code had
   // the args swapped, so every verification hit an invalid Meta URL and
@@ -1078,11 +1113,24 @@ async function parseMessageContent(
 
   // Default shape — each case overrides only the fields it cares about.
   // Keeps the new `interactiveReplyId` field DRY across every return site.
-  const empty = {
+  const empty: {
+    contentText: string | null
+    mediaUrl: string | null
+    mediaType: string | null
+    interactiveReplyId: string | null
+    errorCode: number | null
+    errorTitle: string | null
+    errorDetails: string | null
+  } = {
     contentText: null,
     mediaUrl: null,
     mediaType: null,
     interactiveReplyId: null,
+    // Only the `unsupported` fallback below fills these in; every other
+    // type leaves them null, exactly as before.
+    errorCode: null,
+    errorTitle: null,
+    errorDetails: null,
   }
 
   switch (message.type) {
@@ -1210,11 +1258,30 @@ async function parseMessageContent(
       }
     }
 
-    default:
+    default: {
+      // Meta hands over `type: 'unsupported'` when WhatsApp itself cannot
+      // represent what the customer sent — a view-once photo, a poll, a
+      // disappearing message, or anything from an old or unofficial build.
+      // No content comes with it and there is no endpoint to fetch it
+      // later, so `errors[0]` is the only account of what happened. It was
+      // dropped here, leaving agents with a bare "[Unsupported message
+      // type: unsupported]" and nothing to act on. Keep the reason both in
+      // the visible text and in the same three columns a failed outbound
+      // status uses, so it is readable and queryable (issue #535 added
+      // them for exactly this kind of loss).
+      const reason = message.errors?.[0]
+      const detail =
+        reason?.error_data?.details || reason?.message || reason?.title
       return {
         ...empty,
-        contentText: `[Unsupported message type: ${message.type}]`,
+        contentText: detail
+          ? `[Unsupported message type: ${message.type} — ${detail}]`
+          : `[Unsupported message type: ${message.type}]`,
+        errorCode: reason?.code ?? null,
+        errorTitle: reason?.title ?? null,
+        errorDetails: reason?.error_data?.details ?? reason?.message ?? null,
       }
+    }
   }
 }
 
@@ -1228,206 +1295,426 @@ interface ContactOutcome {
   wasCreated: boolean
 }
 
-async function findOrCreateContact(
+/**
+ * Look a contact up by BSUID. Exact match on the column backing
+ * migration 040's unique index — no fuzzy matching, because a BSUID is
+ * an opaque identifier with exactly one correct spelling.
+ */
+async function findContactByWaUserId(
+  accountId: string,
+  waUserId: string
+): Promise<ContactRow | null> {
+  const { data, error } = await supabaseAdmin()
+    .from('contacts')
+    .select('*')
+    .eq('account_id', accountId)
+    .eq('wa_user_id', waUserId)
+    .maybeSingle()
+
+  if (error) {
+    console.error('[webhook] BSUID contact lookup failed:', error.message)
+    return null
+  }
+  return data ?? null
+}
+
+/**
+ * FORK: look a contact up by WhatsApp @username (case-insensitive, on
+ * the generated `wa_username_normalized` column backing fork migration
+ * 902's unique index).
+ *
+ * Upstream treats the username as display-only and keys on the BSUID.
+ * This fork observed in production that the BSUID token ROTATES for a
+ * returning customer, so the username — the one signal that stayed
+ * constant — is tried FIRST. It is also what lets staff link a known
+ * username onto an existing phone contact by hand, so a later
+ * hidden-number message from that person lands on the same contact.
+ */
+async function findContactByWaUsername(
+  accountId: string,
+  waUsername: string
+): Promise<ContactRow | null> {
+  const { data, error } = await supabaseAdmin()
+    .from('contacts')
+    .select('*')
+    .eq('account_id', accountId)
+    .eq('wa_username_normalized', waUsername.toLowerCase())
+    .maybeSingle()
+
+  if (error) {
+    console.error('[webhook] username contact lookup failed:', error.message)
+    return null
+  }
+  return data ?? null
+}
+
+/**
+ * FORK (legacy rows): before the 2026-11 upstream merge this fork
+ * parked the BSUID in `contacts.phone` — the column is NOT NULL — for a
+ * hidden-number contact, sometimes with `wa_user_id` still NULL. Until
+ * the one-off data cleanup has run (supabase/upgrade/2026-11), such a
+ * row can only be found by an exact match on that parked value.
+ */
+async function findContactByParkedBsuid(
+  accountId: string,
+  waUserId: string
+): Promise<ContactRow | null> {
+  const { data, error } = await supabaseAdmin()
+    .from('contacts')
+    .select('*')
+    .eq('account_id', accountId)
+    .eq('phone', waUserId)
+    .maybeSingle()
+
+  if (error) {
+    console.error('[webhook] parked-BSUID contact lookup failed:', error.message)
+    return null
+  }
+  return data ?? null
+}
+
+/**
+ * Name for a brand-new contact row.
+ *
+ * FORK: prefers the @username over the profile name. For a customer
+ * who has set a username, `profile.name` is often a decorative Unicode
+ * string (stylized mathematical-alphanumeric symbols) that renders as
+ * boxes in the inbox; the username is plain ASCII. Falls back to
+ * upstream's name → phone → BSUID ladder.
+ */
+function inboundDisplayName(identity: WaIdentity): string {
+  return identity.waUsername || identityDisplayName(identity)
+}
+
+type ContactMatch = 'username' | 'bsuid' | 'phone' | 'parked'
+
+/**
+ * True when a contact's `name` is not a name at all but the stand-in a
+ * brand-new row gets when Meta sent no profile: empty, the phone
+ * number, or a BSUID. Those may be upgraded to a real label; anything
+ * else was either typed by staff or already came from a profile, and
+ * is never touched again.
+ */
+function hasPlaceholderName(contact: ContactRow): boolean {
+  const name = String(contact.name ?? '').trim()
+  if (!name) return true
+  if (isBusinessScopedUserId(name)) return true
+  if (name === String(contact.phone ?? '').trim()) return true
+  return /^\+?\d{5,15}$/.test(name)
+}
+
+/** One guarded UPDATE. Never throws — returns whether it was applied. */
+async function writeContactFields(
+  contactId: string,
+  fields: Record<string, unknown>,
+  what: string
+): Promise<boolean> {
+  try {
+    const { error } = await supabaseAdmin()
+      .from('contacts')
+      .update({ ...fields, updated_at: new Date().toISOString() })
+      .eq('id', contactId)
+    if (error) {
+      // Was silent once — a failed write here (e.g. a unique-index
+      // conflict) left wa_user_id / wa_username stuck with nothing in
+      // the logs to explain it.
+      console.error(
+        `[webhook] contact update failed (${what}):`,
+        contactId,
+        error.message
+      )
+      return false
+    }
+    return true
+  } catch (err) {
+    console.error(`[webhook] contact update threw (${what}):`, contactId, err)
+    return false
+  }
+}
+
+/**
+ * Leave a note on both contacts when the same WhatsApp account turned
+ * out to be on two rows, so staff can merge them from the contact page.
+ * Best effort — never throws, never merges by itself (a merge deletes a
+ * row; that is a human decision).
+ */
+async function flagPossibleDuplicate(
   accountId: string,
   configOwnerUserId: string,
-  phone: string,
-  name: string,
-  // The resolved sender id (message.from, or the from_user_id/user_id
-  // fallback for a hidden-number sender) — kept alongside the
-  // normalized `phone` as a fallback identity key. See the
-  // `usingFallbackId` branch below.
-  rawSenderId: string,
-  // `contact.profile.username`, when Meta supplies one. See the
-  // username-first branch below — this is the durable identity signal,
-  // unlike `rawSenderId` (a BSUID routing token that can rotate).
-  waUsername: string | null,
-  // The BSUID itself (message.from_user_id / contact.user_id), kept
-  // separate from `rawSenderId` — which resolves to the phone number
-  // when one is present — so this never ends up holding a phone value.
-  waUserId: string | null,
-): Promise<ContactOutcome | null> {
-  const db = supabaseAdmin()
-
-  // A real Meta phone-number identifier is always digits-only
-  // (optionally a leading '+'). Anything else — letters, a dot, etc.
-  // (a BSUID, e.g. "PE.1128521366369305") — is an opaque non-phone
-  // identifier, regardless of which digits happen to be embedded in it
-  // (confirmed against a real payload — see CLAUDE.md's "WhatsApp
-  // contact identity" section). Computed once: used both to decide
-  // whether it's safe to refresh `phone` on a username-matched contact
-  // below, and for the phone/raw-id fallback dedup further down.
-  const looksLikePhone = looksLikePhoneNumber(rawSenderId)
-
-  // Meta's "WhatsApp usernames" rollout: the BSUID (`rawSenderId`) is a
-  // routing token that can rotate — deduping purely on it means the
-  // same real customer resurfaces as a "new" contact once it changes.
-  // `waUsername` (the customer's public @handle) is the durable signal
-  // instead, so it's tried FIRST — independent of whether THIS delivery
-  // also carries a real phone number. This is what lets:
-  //   (a) a hidden-number customer's contact survive their token
-  //       rotating (matched here; `wa_user_id` refreshed below), and
-  //   (b) staff manually link a known username onto an existing
-  //       phone-having contact (via the contact edit form) so a later
-  //       hidden-number message from that person resolves to THAT
-  //       contact instead of spawning a separate one.
-  if (waUsername) {
-    const { data: byUsername } = await db
+  kept: ContactRow,
+  otherId: string
+): Promise<void> {
+  try {
+    const db = supabaseAdmin()
+    const { data: other } = await db
       .from('contacts')
-      .select('*')
+      .select('id, name, phone, wa_username')
       .eq('account_id', accountId)
-      .eq('wa_username_normalized', waUsername.toLowerCase())
+      .eq('id', otherId)
       .maybeSingle()
-    if (byUsername) {
-      const update: Record<string, unknown> = {}
-      // Only fill in a name the contact doesn't have yet — never
-      // overwrite one that's already set. `name` here prefers the
-      // WhatsApp username over profile.name (see the comment above),
-      // so without this guard a contact staff had manually corrected
-      // (e.g. "Mario") would get silently renamed back to the raw
-      // @handle ("mariof737") on every subsequent message.
-      if (name && !byUsername.name) update.name = name
-      if (waUserId && waUserId !== byUsername.wa_user_id) {
-        update.wa_user_id = waUserId
+    if (!other) return
+    const label = (c: ContactRow) =>
+      c.name || (c.wa_username ? `@${c.wa_username}` : '') || c.phone || c.id
+    await db.from('contact_notes').insert([
+      {
+        account_id: accountId,
+        user_id: configOwnerUserId,
+        contact_id: kept.id,
+        note_text: t('contacts.possibleDuplicateNote', { name: label(other) }),
+      },
+      {
+        account_id: accountId,
+        user_id: configOwnerUserId,
+        contact_id: other.id,
+        note_text: t('contacts.possibleDuplicateNote', { name: label(kept) }),
+      },
+    ])
+    console.warn(
+      '[webhook] possible duplicate contacts (same WhatsApp account):',
+      kept.id,
+      other.id
+    )
+  } catch (err) {
+    console.error('[webhook] could not flag duplicate contacts:', err)
+  }
+}
+
+/**
+ * Write what this delivery told us back onto the contact we matched.
+ *
+ * Differs from upstream's single-UPDATE `contactIdentityPatch` in three
+ * deliberate ways (all FORK guarantees):
+ *
+ *  1. `name` is only ever FILLED, never overwritten. The label Meta
+ *     sends prefers the @username, which almost never equals a name
+ *     staff typed in — an unconditional write renamed "Mario" back to
+ *     "mariof737" on every inbound message. "Filled" includes
+ *     replacing a placeholder (the phone number or a BSUID standing in
+ *     for a name — see `hasPlaceholderName`).
+ *  2. The writes are split (profile → username → BSUID). Each of the
+ *     three identity columns has its own per-account unique index; in
+ *     one UPDATE a conflict on any of them would discard all of them.
+ *  3. The BSUID is CLAIMED, not just written: if another contact in
+ *     the account still holds this token (a stale duplicate of the same
+ *     person), it is moved here atomically so replies in THIS thread
+ *     stay addressable, and the pair is flagged for staff.
+ *
+ * Never throws.
+ */
+async function applyInboundIdentity(
+  accountId: string,
+  configOwnerUserId: string,
+  existing: ContactRow,
+  identity: WaIdentity,
+  matchedBy: ContactMatch
+): Promise<ContactRow> {
+  let contact: ContactRow = existing
+  const storedPhone: string = existing.phone ?? ''
+  const storedIsParked = isBusinessScopedUserId(storedPhone)
+
+  // ---- 1. profile fields ----------------------------------------
+  const profile: Record<string, unknown> = {}
+  const label = identity.waUsername || identity.name
+  if (label && label !== existing.name && hasPlaceholderName(existing)) {
+    profile.name = label
+  }
+  if (
+    identity.waParentUserId &&
+    identity.waParentUserId !== existing.wa_parent_user_id
+  ) {
+    profile.wa_parent_user_id = identity.waParentUserId
+  }
+  if (identity.phone) {
+    // Fill a blank (or replace a parked legacy token) — the moment Meta
+    // discloses the number the contact becomes reachable by every
+    // phone-based path. An existing real number is left alone, except
+    // on a username match: the username IS the identity there, so a
+    // different number means the customer changed phones.
+    const blank = storedIsParked || !normalizePhone(storedPhone)
+    const changed =
+      matchedBy === 'username' && !phonesMatch(storedPhone, identity.phone)
+    if (blank || changed) profile.phone = identity.phone
+  }
+  if (Object.keys(profile).length > 0) {
+    if (await writeContactFields(existing.id, profile, `${matchedBy} match: profile`)) {
+      contact = { ...contact, ...profile }
+    } else if ('phone' in profile && Object.keys(profile).length > 1) {
+      // The phone is the only field here that can hit a unique index
+      // (another contact already owns that number). Retry without it
+      // rather than losing the name / parent id too.
+      const rest = { ...profile }
+      delete rest.phone
+      if (
+        await writeContactFields(
+          existing.id,
+          rest,
+          `${matchedBy} match: profile without phone`
+        )
+      ) {
+        contact = { ...contact, ...rest }
       }
-      // A real phone showed up on this delivery (first time it's
-      // known, or the customer changed numbers) — keep it current.
-      if (looksLikePhone && phone && phone !== byUsername.phone) {
-        update.phone = phone
-      }
-      if (Object.keys(update).length > 0) {
-        update.updated_at = new Date().toISOString()
-        const { error: updateErr } = await db
-          .from('contacts')
-          .update(update)
-          .eq('id', byUsername.id)
-        if (updateErr) {
-          // Was previously silent — a failed write here (e.g. a stray
-          // unique-constraint conflict) left wa_user_id/wa_username
-          // stuck null indefinitely with nothing in the logs to explain
-          // it, which is exactly what made a real instance of this bug
-          // impossible to diagnose from the app alone.
-          console.error(
-            '[webhook] contact update failed (username match):',
-            byUsername.id,
-            updateErr.message
-          )
-        }
-      }
-      return { contact: { ...byUsername, ...update }, wasCreated: false }
     }
   }
 
-  const usingFallbackId = !looksLikePhone && !!rawSenderId
-  const lookupKey = usingFallbackId ? rawSenderId : phone
-
-  // No username match (or none supplied) — fall back to the phone/raw-
-  // id logic. This also covers contacts the pre-username-column
-  // stopgap already created. Find an existing contact for this
-  // account. The shared helper
-  // pre-filters in SQL by the last-8-digit suffix (so we don't pull
-  // every contact on every inbound message) then applies the strict
-  // `phonesMatch` in JS on the small candidate set. The same helper
-  // backs the manual contact form and CSV import, so all three paths
-  // agree on what "same number" means (issue #212) — bypassed above
-  // only for the non-phone fallback case.
-  const existingContact = usingFallbackId
-    ? (
-        await db
-          .from('contacts')
-          .select('*')
-          .eq('account_id', accountId)
-          .eq('phone', lookupKey)
-          .maybeSingle()
-      ).data
-    : await findExistingContact(db, accountId, lookupKey)
-
-  if (existingContact) {
-    const update: Record<string, unknown> = {}
-    // Same guard as the username-match branch above — never overwrite
-    // a name the contact already has.
-    if (name && !existingContact.name) update.name = name
-    // Opportunistic capture: Meta included a username on this delivery
-    // that the existing row doesn't have recorded yet — save it now,
-    // for free, so a future hidden-number message from the same person
-    // already resolves via the username branch above instead of
-    // needing a staff member to link it manually.
-    if (waUsername && waUsername !== existingContact.wa_username) {
-      update.wa_username = waUsername
+  // ---- 2. username ----------------------------------------------
+  // Opportunistic capture: stored even alongside a real, visible phone,
+  // so if this customer later hides the number we already know them.
+  if (identity.waUsername && identity.waUsername !== existing.wa_username) {
+    const fields = { wa_username: identity.waUsername }
+    if (await writeContactFields(existing.id, fields, `${matchedBy} match: username`)) {
+      contact = { ...contact, ...fields }
     }
-    if (waUserId && waUserId !== existingContact.wa_user_id) {
-      update.wa_user_id = waUserId
+  }
+
+  // ---- 3. BSUID -------------------------------------------------
+  // A parked token about to be overwritten by a real phone must not be
+  // lost when this delivery did not carry a BSUID of its own.
+  const token =
+    identity.waUserId ??
+    (storedIsParked && !existing.wa_user_id && contact.phone !== storedPhone
+      ? storedPhone.trim()
+      : null)
+  if (token && token !== existing.wa_user_id) {
+    let claimed = false
+    try {
+      const { data: previousHolder, error } = await supabaseAdmin().rpc(
+        'claim_contact_wa_user_id',
+        {
+          p_account_id: accountId,
+          p_contact_id: existing.id,
+          p_wa_user_id: token,
+        }
+      )
+      if (error) {
+        console.error('[webhook] BSUID claim failed:', existing.id, error.message)
+      } else {
+        claimed = true
+        contact = { ...contact, wa_user_id: token }
+        if (previousHolder && previousHolder !== existing.id) {
+          await flagPossibleDuplicate(
+            accountId,
+            configOwnerUserId,
+            contact,
+            previousHolder as string
+          )
+        }
+      }
+    } catch (err) {
+      console.error('[webhook] BSUID claim threw:', existing.id, err)
     }
-    if (Object.keys(update).length > 0) {
-      update.updated_at = new Date().toISOString()
-      const { error: updateErr } = await db
-        .from('contacts')
-        .update(update)
-        .eq('id', existingContact.id)
-      if (updateErr) {
-        // Same rationale as the username-match branch above — this
-        // write silently failing is what let wa_user_id stay null
-        // forever with no trace of why.
-        console.error(
-          '[webhook] contact update failed (phone/fallback match):',
-          existingContact.id,
-          updateErr.message
-        )
+    if (!claimed) {
+      // The RPC is missing (fork migration 906 not applied yet) or
+      // errored — fall back to a plain write. It can lose to the unique
+      // index when another row holds the token; that is logged, and the
+      // message still belongs to the contact we matched.
+      const fields = { wa_user_id: token }
+      if (await writeContactFields(existing.id, fields, `${matchedBy} match: BSUID`)) {
+        contact = { ...contact, ...fields }
       }
     }
-    return {
-      contact: Object.keys(update).length > 0 ? { ...existingContact, ...update } : existingContact,
-      wasCreated: false,
-    }
+  }
+
+  return contact
+}
+
+/**
+ * Resolve the sender of an inbound message to a contact row.
+ *
+ * Lookup order — username → BSUID → phone → legacy parked BSUID:
+ *   - @username first (FORK; see `findContactByWaUsername`),
+ *   - then upstream's BSUID key (migration 040),
+ *   - then the phone, through the helper shared with the contact form
+ *     and CSV import so all paths agree on "same number" (issue #212),
+ *   - then the fork's pre-merge placeholder rows.
+ * When the username and the BSUID point at DIFFERENT rows the username
+ * wins and `applyInboundIdentity` moves the token over.
+ */
+async function findOrCreateContact(
+  accountId: string,
+  configOwnerUserId: string,
+  identity: WaIdentity
+): Promise<ContactOutcome | null> {
+  let existingContact: ContactRow | null = null
+  let matchedBy: ContactMatch = 'phone'
+
+  if (identity.waUsername) {
+    existingContact = await findContactByWaUsername(accountId, identity.waUsername)
+    if (existingContact) matchedBy = 'username'
+  }
+  if (!existingContact && identity.waUserId) {
+    existingContact = await findContactByWaUserId(accountId, identity.waUserId)
+    if (existingContact) matchedBy = 'bsuid'
+  }
+  if (!existingContact && identity.phone) {
+    existingContact = await findExistingContact(
+      supabaseAdmin(),
+      accountId,
+      identity.phone
+    )
+    if (existingContact) matchedBy = 'phone'
+  }
+  if (!existingContact && identity.waUserId) {
+    existingContact = await findContactByParkedBsuid(accountId, identity.waUserId)
+    if (existingContact) matchedBy = 'parked'
+  }
+
+  if (existingContact) {
+    const contact = await applyInboundIdentity(
+      accountId,
+      configOwnerUserId,
+      existingContact,
+      identity,
+      matchedBy
+    )
+    return { contact, wasCreated: false }
   }
 
   // Create new contact. account_id is the tenancy column;
   // user_id is the NOT NULL FK audit column (no inbound message
   // has a single "user who created" it — we attribute to the
-  // WhatsApp config owner as a stable default). `phone` is NOT NULL,
-  // so a hidden-number contact still gets the BSUID stored there as a
-  // placeholder (`lookupKey`) — the UI is expected to detect that
-  // shape and display `wa_username` instead of the raw token.
-  const { data: newContact, error: createError } = await db
+  // WhatsApp config owner as a stable default).
+  //
+  // `phone` stays NOT NULL in the schema, so a BSUID-only sender is
+  // stored with '' — which migration 022's partial unique index
+  // tolerates, and migration 040's BSUID index is what keeps them
+  // unique instead.
+  const { data: newContact, error: createError } = await supabaseAdmin()
     .from('contacts')
     .insert({
       account_id: accountId,
       user_id: configOwnerUserId,
-      phone: lookupKey,
-      name: name || lookupKey,
-      wa_username: waUsername,
-      wa_user_id: waUserId,
+      phone: identity.phone,
+      name: inboundDisplayName(identity),
+      wa_user_id: identity.waUserId,
+      wa_parent_user_id: identity.waParentUserId,
+      wa_username: identity.waUsername,
     })
     .select()
     .single()
 
   if (createError) {
     // Lost a race: a concurrent inbound delivery (or another path)
-    // created this contact between our lookup and insert, and a
-    // unique index — phone_normalized (022) or wa_username (040) —
-    // rejected the duplicate. Re-resolve the winning row instead of
-    // dropping the message, preferring the same signal we raced on.
+    // created this contact between our lookup and insert, and a unique
+    // index (022's phone, 040's BSUID, or the fork's username) rejected
+    // the duplicate. Re-resolve the existing row, in the same order as
+    // the lookup above, instead of dropping the message.
     if (isUniqueViolation(createError)) {
-      const raced = waUsername
-        ? (
-            await db
-              .from('contacts')
-              .select('*')
-              .eq('account_id', accountId)
-              .eq('wa_username_normalized', waUsername.toLowerCase())
-              .maybeSingle()
-          ).data
-        : usingFallbackId
-          ? (
-              await db
-                .from('contacts')
-                .select('*')
-                .eq('account_id', accountId)
-                .eq('phone', lookupKey)
-                .maybeSingle()
-            ).data
-          : await findExistingContact(db, accountId, lookupKey)
-      if (raced) return { contact: raced, wasCreated: false }
+      if (identity.waUsername) {
+        const raced = await findContactByWaUsername(accountId, identity.waUsername)
+        if (raced) return { contact: raced, wasCreated: false }
+      }
+      if (identity.waUserId) {
+        const raced = await findContactByWaUserId(accountId, identity.waUserId)
+        if (raced) return { contact: raced, wasCreated: false }
+      }
+      if (identity.phone) {
+        const racedByPhone = await findExistingContact(
+          supabaseAdmin(),
+          accountId,
+          identity.phone
+        )
+        if (racedByPhone) return { contact: racedByPhone, wasCreated: false }
+      }
     }
     console.error('Error creating contact:', createError)
     return null
